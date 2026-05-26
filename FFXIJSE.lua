@@ -26,6 +26,12 @@ local config = require('config')
 local texts  = require('texts')
 local images = require('images')
 
+-- Icon pipeline (copied from GSUI; originally Rubenator's EquipViewer code,
+-- BSD-licensed). Extracts item icons from FFXI DAT files into BMPs cached
+-- under libs/cache, then exposes them via icon_handler.create_image /
+-- load_icon. Same API as GSUI for consistency.
+local icon_handler = require('libs/icon_handler')
+
 -- Globals (NOT local) — Nalfey's data modules (inventory.lua, etc.) reference
 -- these as globals (no `local` keyword) so we have to expose them globally
 -- here too. Don't change to `local` or inventory.lua errors out with
@@ -60,12 +66,13 @@ local BORDER       = 3
 local TITLE_BAR_H  = 30
 local TAB_H        = 22
 local TAB_GAP      = 4
-local ROW_H        = 18
-local PIECE_H      = 22         -- piece header row (slightly taller)
+local ROW_H        = 18                  -- material sub-row height
+local ICON_SIZE    = 32                  -- per-piece icon dimensions
+local PIECE_H      = ICON_SIZE + 6       -- min piece row height (icon-driven)
 local SCROLL_BTN_H = 20
 local PAD          = 8
-local PANEL_W      = 540
-local VISIBLE_ROWS = 22
+local PANEL_W      = 580                 -- wider to fit icon + name + materials
+local PANEL_BODY_H = 480                 -- FIXED body height; content scrolls inside
 
 local C_BORDER     = { 220, 70,  130, 200 }
 local C_TITLE_BG   = { 240, 30,  60,  120 }
@@ -150,6 +157,22 @@ local function get_currency_name(mat_name)
         return mat_name
     end
     return nil
+end
+
+-- Name → item_id lookup table. Built lazily on first call because res.items
+-- has ~65k entries and iterating at addon-load adds visible latency. Built
+-- once and reused for every piece-row icon resolution after that.
+local _item_id_cache
+local function item_id_by_name(name)
+    if not name or name == '' then return nil end
+    if not _item_id_cache then
+        _item_id_cache = {}
+        for id, item in pairs(res.items) do
+            if item.name    then _item_id_cache[item.name]    = id end
+            if item.english then _item_id_cache[item.english] = id end
+        end
+    end
+    return _item_id_cache[name]
 end
 
 local function count_material(mat_name)
@@ -253,10 +276,15 @@ local function compute_piece_states()
             local nxt   = next_tier(owned)
             local mats  = (nxt and piece[3]) and piece[3][nxt] or nil
             local ready = mats and can_upgrade(mats)
+            local long_name = (piece[1] or {})[1] or '?'
+            -- Resolve the owned-tier item ID so we can pull its icon.
+            local probe = (owned == 'NQ') and long_name or (long_name .. ' ' .. owned)
+            local item_id = item_id_by_name(probe) or item_id_by_name(long_name)
             table.insert(out, {
                 piece = piece,
-                name  = (piece[1] or {})[1] or '?',
+                name  = long_name,
                 owned = owned,
+                item_id = item_id,
                 next_tier = nxt,
                 mats  = mats,
                 ready = ready,
@@ -282,7 +310,7 @@ end
 local function destroy_window()
     for _, e in pairs(ui.el)   do destroy(e) end
     for _, r in ipairs(ui.rows) do
-        destroy(r.header); destroy(r.bg)
+        destroy(r.header); destroy(r.bg); destroy(r.icon)
         if r.mats then for _, mt in ipairs(r.mats) do destroy(mt) end end
     end
     ui.el = {}
@@ -296,13 +324,10 @@ local function build_window()
     local pieces = compute_piece_states()
     ui.cached_pieces = pieces
 
-    -- Compute total content height
-    local content_h = 0
-    for _, p in ipairs(pieces) do content_h = content_h + piece_block_height(p) end
-    if content_h == 0 then content_h = PIECE_H end  -- placeholder for empty
-
-    local panel_h = math.min(content_h + PAD * 2, VISIBLE_ROWS * ROW_H + PAD * 2)
-    ui.total_h = BORDER * 2 + TITLE_BAR_H + panel_h + PAD * 2
+    -- FIXED window height — body is always PANEL_BODY_H tall, scrollable.
+    -- Stops the window from jumping around in size as you change tabs /
+    -- jobs / inventory.
+    ui.total_h = BORDER * 2 + TITLE_BAR_H + PANEL_BODY_H
 
     local x, y = settings.pos.x, settings.pos.y
     local W, H = ui.total_w, ui.total_h
@@ -372,14 +397,15 @@ local function build_window()
         return
     end
 
-    -- List mode — owned pieces only. Two columns:
-    --   LEFT  (name + current tier + status icon)  ~240px
-    --   RIGHT (materials for next upgrade, or "✓ MAXED" if at +4)
+    -- List mode — owned pieces only. Three-column-ish layout:
+    --   [icon] [name + tier + status]              [materials | MAXED]
+    --    32px   ~210px                             ~280px
     --
     -- Scroll offsets the entire content; pieces outside the visible body
-    -- band are skipped on render to save work.
-    local left_x  = tb_x + PAD
-    local right_x = tb_x + PAD + 240
+    -- band are skipped on render to save image-element creation work.
+    local icon_x  = tb_x + PAD
+    local name_x  = icon_x + ICON_SIZE + 8
+    local right_x = tb_x + PAD + ICON_SIZE + 8 + 210
     local cur_y   = body_y + PAD - ui.scroll
     local body_top = body_y
     local body_bot = body_y + body_h - PAD
@@ -389,8 +415,9 @@ local function build_window()
         local block_top = cur_y
         local block_bot = cur_y + block_h
 
+        -- Only render pieces that intersect the visible body band
         if block_bot > body_top and block_top < body_bot then
-            -- ===== LEFT column: "<piece name> (current tier)  <icon>" =====
+            -- ===== LEFT: icon + name + status =====
             local left_icon, left_color
             if not p.next_tier then
                 left_icon  = '✓'           -- maxed
@@ -403,18 +430,29 @@ local function build_window()
                 left_color = C_PIECE_NEED
             end
 
+            -- 32x32 item icon. icon_handler.create_image returns a hidden
+            -- image element; load_icon binds the texture by item ID.
+            -- If item_id couldn't be resolved (rare), the image stays
+            -- empty alpha=0 so it doesn't render a gray box.
+            local icon = icon_handler.create_image({
+                pos  = { x = icon_x, y = cur_y },
+                size = { width = ICON_SIZE, height = ICON_SIZE },
+            })
+            if p.item_id then
+                icon_handler.load_icon(icon, p.item_id)
+            end
+
+            -- Name text sits ~6px down so it visually centers next to the icon
             local owned_label = (p.owned == 'NQ') and '' or (' ' .. p.owned)
             local left_str = string.format('%s %s%s', left_icon, p.name, owned_label)
-            local left_text = make_text(left_str, left_x, cur_y, left_color, 11, false)
+            local left_text = make_text(left_str, name_x, cur_y + 8, left_color, 11, false)
 
-            -- ===== RIGHT column: materials list or MAXED =====
+            -- ===== RIGHT: materials list or MAXED =====
             local mat_texts = {}
             if not p.next_tier then
-                -- Maxed — single-line "MAXED" on the right
-                local mt = make_text('MAXED (+4)', right_x, cur_y, C_PIECE_MAX, 11, true)
+                local mt = make_text('MAXED (+4)', right_x, cur_y + 8, C_PIECE_MAX, 11, true)
                 table.insert(mat_texts, mt)
             elseif p.mats and #p.mats > 0 then
-                -- Stack each material on its own line
                 for i, mat in ipairs(p.mats) do
                     local have  = count_material(mat.name)
                     local ok    = have >= mat.count
@@ -425,12 +463,11 @@ local function build_window()
                     table.insert(mat_texts, mt)
                 end
             else
-                -- Unknown tier (e.g. NQ owned but no +1 chain in data)
-                local mt = make_text('—', right_x, cur_y, C_SUMMARY, 11, false)
+                local mt = make_text('—', right_x, cur_y + 8, C_SUMMARY, 11, false)
                 table.insert(mat_texts, mt)
             end
 
-            table.insert(ui.rows, { header = left_text, mats = mat_texts })
+            table.insert(ui.rows, { icon = icon, header = left_text, mats = mat_texts })
         end
 
         cur_y = cur_y + block_h
@@ -439,6 +476,7 @@ local function build_window()
 
     for _, e in pairs(ui.el) do show(e) end
     for _, r in ipairs(ui.rows) do
+        if r.icon then show(r.icon) end
         if r.header then show(r.header) end
         if r.mats then for _, mt in ipairs(r.mats) do show(mt) end end
     end
@@ -613,6 +651,13 @@ end)
 -- Lifecycle
 -- =============================================================================
 windower.register_event('load', function()
+    -- Initialize icon extraction (BMPs into libs/cache/<id>.bmp on demand).
+    -- icon_handler reads the FFXI install path via windower.ffxi_path; if
+    -- that's not set (rare), get_icon_path returns nil and we'll just
+    -- skip the icon on those rows.
+    icon_handler.init(windower.ffxi_path)
+    icon_handler.set_ui_visible(true)
+
     -- Defer slightly so player + inventory are ready, then open the
     -- window if the saved-state says so (default visible=true so it
     -- opens on first install). User can hide with O key or //fj hide.
@@ -631,4 +676,5 @@ end)
 
 windower.register_event('unload', function()
     destroy_window()
+    if icon_handler and icon_handler.cleanup then icon_handler.cleanup() end
 end)
