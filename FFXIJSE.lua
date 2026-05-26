@@ -32,6 +32,11 @@ local images = require('images')
 -- load_icon. Same API as GSUI for consistency.
 local icon_handler = require('libs/icon_handler')
 
+-- extdata is Windower's library for decoding item augments + other extended
+-- data on items. We use extdata.decode(item).augments to read the chosen
+-- augment strings off an Ambuscade cape (Capes tab).
+local extdata = require('extdata')
+
 -- Globals (NOT local) — Nalfey's data modules (inventory.lua, etc.) reference
 -- these as globals (no `local` keyword) so we have to expose them globally
 -- here too. Don't change to `local` or inventory.lua errors out with
@@ -801,25 +806,60 @@ local function compute_piece_states()
         local cape_name = JOB_CAPE[job:lower()]
         if not cape_name then return {} end
         local item_id = item_id_by_name(cape_name)
-        local locs = find_item_locations(cape_name)
-        local owned = (#locs > 0) and 'NQ' or nil
-        -- Also check if it's equipped
-        if not owned and item_id and find_equipped_slot(item_id) then
-            owned = 'NQ'
+
+        -- Find the cape item itself (across all bags + equipped) so we can
+        -- decode its augments via extdata. We need the actual item table,
+        -- not just the resource definition — augments live in item.extdata.
+        local items = windower.ffxi.get_items()
+        local cape_item = nil
+        if item_id and items then
+            -- Walk every bag including equipped (via equipment table)
+            local function scan_bag(bag_name)
+                local bag = items[bag_name]
+                if not bag or type(bag) ~= 'table' then return end
+                for slot = 1, (bag.max or 80) do
+                    local it = bag[slot]
+                    if it and type(it) == 'table' and it.id == item_id then
+                        cape_item = it
+                        return
+                    end
+                end
+            end
+            for _, name in pairs(BAG_NAMES) do
+                if not cape_item then scan_bag(name) end
+            end
         end
-        if not owned then return {} end   -- Cape not owned → empty state
-        local fake_mats = {}
-        for _, aug in ipairs(CAPE_AUG_ITEMS) do
-            table.insert(fake_mats, { name = aug, count = 0 })
+
+        local augments = nil
+        if cape_item then
+            local decoded = extdata.decode(cape_item)
+            augments = decoded and decoded.augments or nil
         end
+
+        if not cape_item then return {} end   -- empty state covers "not owned"
+
+        -- Build the "mats" list from the cape's actual augments (not the
+        -- augment items in your inventory — those go in the Trade NPC flow).
+        -- Skip empty / "none" augment entries.
+        local aug_lines = {}
+        if augments then
+            for _, a in ipairs(augments) do
+                local clean = (a or ''):gsub('^%s+', ''):gsub('%s+$', '')
+                if clean ~= '' and clean:lower() ~= 'none' then
+                    table.insert(aug_lines, clean)
+                end
+            end
+        end
+
         return { {
             piece = nil,
             name  = cape_name,
-            owned = owned,
+            owned = 'NQ',
             item_id = item_id,
-            next_tier = 'Augment',     -- not really a tier — drives "next" rendering
-            mats  = fake_mats,
-            ready = nil,                -- N/A for capes
+            next_tier = 'Augment',          -- not a real tier; just non-nil so render takes "augment" path
+            cape_augments = aug_lines,      -- list of augment strings
+            mats  = aug_lines,              -- compat: piece_block_height uses #p.mats
+            ready = nil,
             is_cape = true,
         } }
     end
@@ -1116,21 +1156,22 @@ local function build_window()
             -- ===== RIGHT: materials list or MAXED =====
             local mat_texts = {}
             if p.is_cape then
-                -- Cape tab: show augment-item inventory counts (no x/y
-                -- requirement — you can't be "short", you just have what
-                -- you have) + a hint to use //capetrader for the actual
-                -- augmentation.
-                for i, mat in ipairs(p.mats) do
-                    local have  = count_material(mat.name)
-                    local where = bag_summary(mat.name)
-                    local color = (have > 0) and C_MAT_HAVE or C_SUMMARY
-                    local line  = string.format('%s x%d  %s', mat.name, have, where)
-                    local mt = make_text(line, right_x, cur_y + (i - 1) * ROW_H, color, 10)
+                -- Cape tab: show the AUGMENTS chosen on this cape, decoded
+                -- from the item's extdata. Empty slots / "none" entries are
+                -- filtered out in compute_piece_states.
+                local aug_list = p.cape_augments or {}
+                if #aug_list == 0 then
+                    local mt = make_text(
+                        'No augments yet — use //capetrader prep / go to augment',
+                        right_x, cur_y + 8, C_SUMMARY, 10, false)
                     table.insert(mat_texts, mt)
+                else
+                    for i, aug in ipairs(aug_list) do
+                        local mt = make_text('• ' .. aug, right_x,
+                            cur_y + (i - 1) * ROW_H, C_MAT_HAVE, 10)
+                        table.insert(mat_texts, mt)
+                    end
                 end
-                local hint = make_text('Use //capetrader prep / go for augments',
-                    right_x, cur_y + (#p.mats) * ROW_H, C_SUMMARY, 9)
-                table.insert(mat_texts, hint)
             elseif not p.next_tier then
                 local mt = make_text('MAXED (+4)', right_x, cur_y + 8, C_PIECE_MAX, 11, true)
                 table.insert(mat_texts, mt)
