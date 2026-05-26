@@ -257,57 +257,51 @@ local function can_upgrade(mats)
 end
 
 -- =============================================================================
--- Bag IDs (Windower convention) — used for moving items between containers
+-- Bag IDs and names
 -- =============================================================================
--- These are the FFXI internal storage IDs. windower.ffxi.put_item(bag, slot,
--- count) moves the stack to the inventory bag.
+-- windower.ffxi.get_items() returns bags keyed by NAME (items.inventory,
+-- items.satchel, items.wardrobe2, etc.). windower.ffxi.put_item() takes
+-- the numeric bag ID. So we keep both — id and name — and index back and
+-- forth.
 local BAG = {
-    inventory  = 0,
-    safe       = 1,
-    storage    = 2,
-    temporary  = 3,
-    locker     = 4,
-    satchel    = 5,
-    sack       = 6,
-    case       = 7,
-    wardrobe   = 8,
-    safe2      = 9,
-    wardrobe2  = 10,
-    wardrobe3  = 11,
-    wardrobe4  = 12,
-    wardrobe5  = 13,
-    wardrobe6  = 14,
-    wardrobe7  = 15,
-    wardrobe8  = 16,
+    inventory = 0,  safe     = 1,  storage   = 2,  temporary = 3,
+    locker    = 4,  satchel  = 5,  sack      = 6,  case      = 7,
+    wardrobe  = 8,  safe2    = 9,  wardrobe2 = 10, wardrobe3 = 11,
+    wardrobe4 = 12, wardrobe5= 13, wardrobe6 = 14, wardrobe7 = 15,
+    wardrobe8 = 16,
 }
+local BAG_NAMES = {}                            -- id  → name
+for name, id in pairs(BAG) do BAG_NAMES[id] = name end
 
 -- Mog-house-only bags. Player can only access these while standing in a
--- mog house — pull-from attempts elsewhere fail silently.
+-- mog house — pull-from attempts elsewhere fail silently. Mog House is
+-- usually accessible: safe, safe2, storage, locker. Sack/Satchel/Case are
+-- field-accessible.
 local MOG_ONLY = {
     [BAG.safe]    = 'Mog Safe',
     [BAG.safe2]   = 'Mog Safe 2',
     [BAG.storage] = 'Storage',
-    [BAG.locker]  = 'Locker',
+    [BAG.locker]  = 'Mog Locker',
 }
 
--- Accessible-from-anywhere bags (we'll scan these freely)
+-- Accessible-from-anywhere bags
 local FIELD_BAGS = {
     BAG.inventory, BAG.wardrobe, BAG.wardrobe2, BAG.wardrobe3, BAG.wardrobe4,
     BAG.wardrobe5, BAG.wardrobe6, BAG.wardrobe7, BAG.wardrobe8,
-    BAG.satchel,   BAG.sack,      BAG.case,
+    BAG.satchel,   BAG.sack,     BAG.case,
 }
 
--- Detect if player is in a mog house (rough heuristic — mog-only bags appear
--- non-zero in get_items() output when in mog house).
+-- Detect if player is in a mog house. The mog-house-only bags become
+-- "enabled" only while standing in the mog house. Outside, they show
+-- enabled=false (or zero size), so the player can't pull from them.
 local function in_mog_house()
     local items = windower.ffxi.get_items()
     if not items then return false end
-    -- Mog safe is enabled (non-zero max) only when in a mog house instance
-    return items[BAG.safe] and items[BAG.safe].enabled
+    return items.safe ~= nil and items.safe.enabled == true
 end
 
 -- Walk every bag and find slots holding the given item name.
--- Returns list of {bag_id, slot_id, count, mog_only}.
+-- Returns list of {bag_id, slot, count, mog_only, bag_name}.
 local function find_item_locations(item_name)
     local target_id = item_id_by_name(item_name)
     if not target_id then return {} end
@@ -317,24 +311,26 @@ local function find_item_locations(item_name)
     if not items then return out end
 
     local function scan(bag_id)
-        local bag = items[bag_id]
+        local bag_name = BAG_NAMES[bag_id]
+        local bag = bag_name and items[bag_name]
         if not bag or type(bag) ~= 'table' then return end
         for slot = 1, (bag.max or 80) do
             local it = bag[slot]
             if it and type(it) == 'table' and it.id == target_id and (it.count or 0) > 0 then
                 table.insert(out, {
-                    bag_id = bag_id,
-                    slot   = slot,
-                    count  = it.count,
+                    bag_id   = bag_id,
+                    bag_name = bag_name,
+                    slot     = slot,
+                    count    = it.count,
                     mog_only = MOG_ONLY[bag_id] ~= nil,
                 })
             end
         end
     end
 
-    -- Field bags first
+    -- Field bags first (they're always pullable)
     for _, b in ipairs(FIELD_BAGS) do scan(b) end
-    -- Then mog-only
+    -- Then mog-only (might be pullable, might not — caller decides)
     for b, _ in pairs(MOG_ONLY) do scan(b) end
     return out
 end
