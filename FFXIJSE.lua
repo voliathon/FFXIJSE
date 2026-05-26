@@ -1075,11 +1075,19 @@ local function build_window()
 
 
     for _, e in pairs(ui.el) do show(e) end
-    for _, r in ipairs(ui.rows) do
-        if r.bg then show(r.bg) end       -- selection highlight (under everything)
-        if r.icon then show(r.icon) end
-        if r.header then show(r.header) end
-        if r.mats then for _, mt in ipairs(r.mats) do show(mt) end end
+
+    -- When the job-picker dropdown is open we DON'T render the piece rows
+    -- — Windower's text primitives always draw on top of image primitives,
+    -- so row text would visibly punch through the dropdown background.
+    -- Instead we let the (opaque) body bg show through behind the dropdown,
+    -- and restore the rows when the dropdown closes (next build).
+    if not ui.dropdown_open then
+        for _, r in ipairs(ui.rows) do
+            if r.bg then show(r.bg) end       -- selection highlight (under everything)
+            if r.icon then show(r.icon) end
+            if r.header then show(r.header) end
+            if r.mats then for _, mt in ipairs(r.mats) do show(mt) end end
+        end
     end
 
     -- Render dropdown LAST so it sits on top of everything
