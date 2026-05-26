@@ -23,16 +23,23 @@ require('strings')
 require('pack')
 
 local config = require('config')
-local res    = require('resources')
 local texts  = require('texts')
 local images = require('images')
-local file   = require('files')
-local slips  = require('slips')
 
--- Data modules from the original JSE addon (unmodified)
-local job_equipment = require('job_equipment')
-local currency      = require('currency')
-local inventory     = require('inventory')
+-- Globals (NOT local) — Nalfey's data modules (inventory.lua, etc.) reference
+-- these as globals (no `local` keyword) so we have to expose them globally
+-- here too. Don't change to `local` or inventory.lua errors out with
+-- "attempt to index global 'slips' (a nil value)" at line 207.
+res   = require('resources')
+file  = require('files')
+slips = require('slips')
+
+-- Data modules from the original JSE addon (unmodified — also globals so
+-- inter-module references like `currency.get_value(...)` work even if we
+-- only need a local handle on this side).
+job_equipment = require('job_equipment')
+currency      = require('currency')
+inventory     = require('inventory')
 
 -- =============================================================================
 -- Settings (persistent)
