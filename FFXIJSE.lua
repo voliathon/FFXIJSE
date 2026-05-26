@@ -922,10 +922,12 @@ local function build_window()
 
     -- Job tag (right side of title bar) — clickable to open the job picker
     -- dropdown. The "*" suffix indicates an override is active (vs auto-
-    -- detected from main_job).
+    -- detected from main_job). A ▼ / ▲ arrow at the end makes it obvious
+    -- the tag is interactive (flips to ▲ while the dropdown is open).
     local job = active_job()
     local jt_x = tb_x + tb_w - job_tag_w + 4
-    local tag_label = settings.job and ('[' .. job .. '*]') or ('[' .. job .. ']')
+    local arrow = ui.dropdown_open and ' ▲' or ' ▼'
+    local tag_label = (settings.job and ('[' .. job .. '*]') or ('[' .. job .. ']')) .. arrow
     local tag_color = ui.dropdown_open and C_JOB_TAG_HOVER or C_JOB_TAG
     ui.el.job_tag = make_text(tag_label, jt_x, tb_y + 7, tag_color, 11, true)
     ui.rect.job_tag = { x = jt_x - 2, y = tb_y, w = job_tag_w - 4, h = TITLE_BAR_H }
