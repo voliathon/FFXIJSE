@@ -47,7 +47,7 @@ To autoload every session, add `lua load FFXIJSE` to
 
 ## Window
 
-Press **J** to toggle the window (chat-aware — the key passes through
+Press **O** to toggle the window (chat-aware — the key passes through
 to chat when typing). Or run `//fj` (or `//ffxijse`).
 
 Layout (matches GSUI's visual style — blue border, dark title bar,
@@ -81,7 +81,7 @@ Below each non-maxed piece, the required materials list:
 
 | Command | What |
 |---|---|
-| `//fj` (or `//ffxijse`) | Toggle the window (same as J key) |
+| `//fj` (or `//ffxijse`) | Toggle the window (same as O key) |
 | `//fj show` / `//fj hide` | Explicit show/hide |
 | `//fj af` / `//fj relic` / `//fj empy` | Switch tab |
 | `//fj job <JOB>` | Override displayed job (e.g. `//fj job war`) |

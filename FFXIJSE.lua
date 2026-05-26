@@ -39,7 +39,7 @@ local inventory     = require('inventory')
 -- =============================================================================
 local defaults = {
     pos     = { x = 220, y = 220 },
-    visible = false,
+    visible = true,                 -- open by default; hidden state persists if user hides
     tab     = 'ARTIFACT',           -- ARTIFACT | RELIC | EMPYREAN
     job     = nil,                  -- nil = auto-detect from player
 }
@@ -510,11 +510,12 @@ windower.register_event('mouse', function(mtype, x, y, delta, blocked)
     return true   -- swallow other events over our window
 end)
 
--- J key toggle (DIK_J = 0x24 = 36)
-local DIK_J = 36
+-- O key toggle (DIK_O = 0x18 = 24)
+-- Chat-open guard so typing 'o' in chat doesn't fire the toggle.
+local DIK_O = 24
 windower.register_event('keyboard', function(dik, pressed, flags, blocked)
     if blocked or not pressed then return end
-    if dik ~= DIK_J then return end
+    if dik ~= DIK_O then return end
     local info = windower.ffxi.get_info()
     if info and info.chat_open then return end
     toggle_window()
@@ -570,6 +571,9 @@ end)
 -- Lifecycle
 -- =============================================================================
 windower.register_event('load', function()
+    -- Defer slightly so player + inventory are ready, then open the
+    -- window if the saved-state says so (default visible=true so it
+    -- opens on first install). User can hide with O key or //fj hide.
     coroutine.schedule(function()
         if settings.visible then show_window() end
     end, 2)
