@@ -273,6 +273,38 @@ local BAG = {
 local BAG_NAMES = {}                            -- id  → name
 for name, id in pairs(BAG) do BAG_NAMES[id] = name end
 
+-- Short labels for the per-material "currently in [...]" tag in the UI.
+local BAG_SHORT = {
+    [BAG.inventory] = 'Inv',
+    [BAG.safe]      = 'Safe',
+    [BAG.safe2]     = 'Safe2',
+    [BAG.storage]   = 'Stor',
+    [BAG.locker]    = 'Lock',
+    [BAG.satchel]   = 'Sat',
+    [BAG.sack]      = 'Sack',
+    [BAG.case]      = 'Case',
+    [BAG.wardrobe]  = 'Wd1',
+    [BAG.wardrobe2] = 'Wd2',
+    [BAG.wardrobe3] = 'Wd3',
+    [BAG.wardrobe4] = 'Wd4',
+    [BAG.wardrobe5] = 'Wd5',
+    [BAG.wardrobe6] = 'Wd6',
+    [BAG.wardrobe7] = 'Wd7',
+    [BAG.wardrobe8] = 'Wd8',
+}
+
+-- Equipment slot → /unequip command argument. windower.ffxi.get_items()
+-- returns equipment keyed by these names, mostly matching what /unequip
+-- expects except for the left/right pairs.
+local UNEQUIP_SLOT = {
+    main = 'main', sub = 'sub', range = 'range', ammo = 'ammo',
+    head = 'head', neck = 'neck',
+    left_ear  = 'ear1',  right_ear  = 'ear2',
+    body = 'body', hands = 'hands',
+    left_ring = 'ring1', right_ring = 'ring2',
+    back = 'back', waist = 'waist', legs = 'legs', feet = 'feet',
+}
+
 -- Mog-house-only bags. Player can only access these while standing in a
 -- mog house — pull-from attempts elsewhere fail silently. Mog House is
 -- usually accessible: safe, safe2, storage, locker. Sack/Satchel/Case are
@@ -350,6 +382,64 @@ local function inventory_free_slots()
     return (inv.max or 80) - used
 end
 
+-- For a given item name, build a comma-joined short bag tag like
+-- "[Inv, Wd2]" or "[Equip]" for the UI. Returns "" when not owned anywhere.
+-- "[Equip]" is added FIRST in the list when the item is currently worn.
+local function bag_summary(item_name)
+    local target_id = item_id_by_name(item_name)
+    if not target_id then return '' end
+
+    local seen, list = {}, {}
+    local function add(short)
+        if short and not seen[short] then
+            seen[short] = true
+            table.insert(list, short)
+        end
+    end
+
+    local items = windower.ffxi.get_items()
+    if not items then return '' end
+
+    -- Equipment first (always show "[Equip]" up front if worn)
+    if items.equipment then
+        for slot, eq in pairs(items.equipment) do
+            if type(eq) == 'table' and eq.bag and eq.slot and eq.slot > 0 then
+                local bag = items[BAG_NAMES[eq.bag] or '']
+                local it = bag and bag[eq.slot]
+                if it and type(it) == 'table' and it.id == target_id then
+                    add('Equip')
+                end
+            end
+        end
+    end
+
+    -- Then every other bag
+    for _, loc in ipairs(find_item_locations(item_name)) do
+        add(BAG_SHORT[loc.bag_id] or '?')
+    end
+
+    if #list == 0 then return '' end
+    return '[' .. table.concat(list, ', ') .. ']'
+end
+
+-- Find the equipment slot the given item ID is currently equipped to (if any).
+-- Returns (slot_unequip_name, bag_id, bag_slot) or nil.
+local function find_equipped_slot(item_id)
+    if not item_id then return nil end
+    local items = windower.ffxi.get_items()
+    if not items or not items.equipment then return nil end
+    for slot, eq in pairs(items.equipment) do
+        if type(eq) == 'table' and eq.bag and eq.slot and eq.slot > 0 then
+            local bag = items[BAG_NAMES[eq.bag] or '']
+            local it = bag and bag[eq.slot]
+            if it and type(it) == 'table' and it.id == item_id then
+                return UNEQUIP_SLOT[slot] or slot, eq.bag, eq.slot
+            end
+        end
+    end
+    return nil
+end
+
 -- =============================================================================
 -- UI state + element refs
 -- =============================================================================
@@ -389,8 +479,63 @@ local function gather_for_piece(piece_state)
 
     local in_mog = in_mog_house()
     local mog_blocked = {}     -- materials sitting in mog-only bags
-    local moves = {}           -- planned moves: {bag_id, slot, count}
+    local moves = {}           -- planned moves: {bag_id, slot, count, name}
     local still_need = {}      -- per-material remaining need (after inv-on-hand)
+    local unequip_first = nil  -- if non-nil, /unequip <slot> before put_item
+
+    -- ===== Piece itself =====
+    -- The trade NPC requires the piece + materials in main inventory. Find
+    -- the OWNED-tier piece's current location. If it's equipped, schedule
+    -- an /unequip before the put_item. If it's already in inventory, skip.
+    local owned_probe = (piece_state.owned == 'NQ') and piece_state.name
+                        or (piece_state.name .. ' ' .. piece_state.owned)
+    local piece_id = item_id_by_name(owned_probe) or piece_state.item_id
+    if piece_id then
+        local items = windower.ffxi.get_items()
+        local inv = items and items.inventory
+        local already_in_inv = false
+        if inv then
+            for slot = 1, (inv.max or 80) do
+                local it = inv[slot]
+                if it and type(it) == 'table' and it.id == piece_id then
+                    already_in_inv = true
+                    break
+                end
+            end
+        end
+        if not already_in_inv then
+            local eq_slot, eq_bag, eq_slot_idx = find_equipped_slot(piece_id)
+            if eq_slot then
+                -- Currently equipped — unequip first, then move from its wardrobe slot
+                unequip_first = eq_slot
+                table.insert(moves, {
+                    bag_id = eq_bag, slot = eq_slot_idx, count = 1,
+                    name = owned_probe, is_piece = true,
+                })
+            else
+                -- Look in non-equipped storage
+                local locs = find_item_locations(owned_probe)
+                local placed = false
+                for _, loc in ipairs(locs) do
+                    if loc.bag_id ~= BAG.inventory then
+                        if loc.mog_only and not in_mog then
+                            mog_blocked[owned_probe] = (mog_blocked[owned_probe] or 0) + 1
+                        else
+                            table.insert(moves, {
+                                bag_id = loc.bag_id, slot = loc.slot, count = 1,
+                                name = owned_probe, is_piece = true,
+                            })
+                            placed = true
+                            break    -- one piece is enough
+                        end
+                    end
+                end
+                if not placed and not mog_blocked[owned_probe] then
+                    still_need[owned_probe] = 1
+                end
+            end
+        end
+    end
 
     -- For each material, see how much we already have in main inventory
     local items = windower.ffxi.get_items() or {}
@@ -470,11 +615,23 @@ local function gather_for_piece(piece_state)
         return
     end
 
-    -- Execute moves (Windower's put_item moves the slot into main inventory)
+    -- Execute moves (Windower's put_item moves the slot into main inventory).
+    -- If the piece is currently equipped, unequip first and delay the moves
+    -- ~0.7s so the server processes the unequip before the put_item.
     notify(('Gathering %d stack(s) for %s...'):format(#moves, piece_state.name), 158)
-    for _, mv in ipairs(moves) do
-        windower.ffxi.put_item(mv.bag_id, mv.slot, mv.count)
-        notify(('  + %s x%d'):format(mv.name, mv.count), 160)
+    local function do_moves()
+        for _, mv in ipairs(moves) do
+            windower.ffxi.put_item(mv.bag_id, mv.slot, mv.count)
+            local tag = mv.is_piece and '  (piece) +' or '  + '
+            notify(('%s%s x%d'):format(tag, mv.name, mv.count), 160)
+        end
+    end
+    if unequip_first then
+        notify('  /unequip ' .. unequip_first .. '  (piece is currently worn)', 167)
+        windower.send_command('input /unequip ' .. unequip_first)
+        coroutine.schedule(do_moves, 0.7)
+    else
+        do_moves()
     end
 
     -- Surface any still-blocked items so the user knows what's left
@@ -818,7 +975,8 @@ local function build_window()
                     local ok    = have >= mat.count
                     local color = ok and C_MAT_HAVE or C_MAT_NEED
                     local check = ok and '✓' or '✗'
-                    local line  = string.format('%s %s  %d/%d', check, mat.name, have, mat.count)
+                    local where = bag_summary(mat.name)
+                    local line  = string.format('%s %s  %d/%d  %s', check, mat.name, have, mat.count, where)
                     local mt = make_text(line, right_x, cur_y + (i - 1) * ROW_H, color, 10)
                     table.insert(mat_texts, mt)
                 end
