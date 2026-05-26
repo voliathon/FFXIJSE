@@ -76,6 +76,19 @@ local BTN_H        = 26
 local PANEL_W      = 580                 -- wider to fit icon + name + materials
 local PANEL_BODY_H = 460                 -- FIXED body height; content scrolls inside
 
+-- Job picker dropdown (3 cols × 8 rows = 24 cells; 23 entries: Auto + 22 jobs)
+local DROPDOWN_COLS = 3
+local DROPDOWN_ROWS = 8
+local DROPDOWN_CELL_W = 56
+local DROPDOWN_CELL_H = 22
+local DROPDOWN_W = DROPDOWN_COLS * DROPDOWN_CELL_W + 4
+local DROPDOWN_H = DROPDOWN_ROWS * DROPDOWN_CELL_H + 4
+local JOB_LIST = {
+    'AUTO', 'WAR', 'MNK', 'WHM', 'BLM', 'RDM', 'THF', 'PLD',
+    'DRK',  'BST', 'BRD', 'RNG', 'SAM', 'NIN', 'DRG', 'SMN',
+    'BLU',  'COR', 'PUP', 'DNC', 'SCH', 'GEO', 'RUN',
+}
+
 local C_BORDER     = { 220, 70,  130, 200 }
 local C_TITLE_BG   = { 240, 30,  60,  120 }
 local C_TITLE_TXT  = { 255, 200, 200, 230 }
@@ -104,6 +117,13 @@ local C_BTN_TRADE_ON   = { 220, 110, 80,  50 }  -- amber, ready
 local C_BTN_TRADE_OFF  = { 130, 60,  40,  30 }  -- dim
 local C_BTN_TXT_ON     = { 255, 240, 240, 240 }
 local C_BTN_TXT_OFF    = { 200, 160, 160, 160 }
+-- Job dropdown
+local C_DROP_BG        = { 240, 20,  35,  60 }
+local C_DROP_CELL_OFF  = { 220, 40,  55,  90 }
+local C_DROP_CELL_ON   = { 240, 70,  130, 180 }  -- active job
+local C_DROP_TXT_OFF   = { 255, 200, 200, 220 }
+local C_DROP_TXT_ON    = { 255, 255, 255, 255 }
+local C_JOB_TAG_HOVER  = { 255, 255, 230, 160 }
 
 -- Tier mapping ARMOR-TYPE → upgrade chain available
 local TIER_ORDER  = { 'NQ', '+1', '+2', '+3', '+4' }
@@ -457,6 +477,10 @@ local ui = {
     -- Selected piece (for the Gather / Trade buttons to act on). Stored as
     -- piece name + tier since piece-state objects rebuild every refresh.
     selected_name = nil,
+    -- Job-picker dropdown open state (toggled by clicking the [JOB] tag)
+    dropdown_open = false,
+    dropdown_el   = {},
+    dropdown_rect = {},          -- cell-key → {x, y, w, h, job}
 }
 
 -- =============================================================================
@@ -790,7 +814,52 @@ end
 -- Window build / destroy
 -- =============================================================================
 
+-- Destroy the job-picker dropdown elements (called when closing / rebuilding)
+local function destroy_dropdown()
+    for _, e in pairs(ui.dropdown_el) do destroy(e) end
+    ui.dropdown_el   = {}
+    ui.dropdown_rect = {}
+end
+
+-- Render the job-picker dropdown right below the title bar, anchored to the
+-- right edge (under the job tag).
+local function build_dropdown()
+    destroy_dropdown()
+    if not ui.dropdown_open then return end
+
+    -- Anchor: right edge under the job tag
+    local x = settings.pos.x + ui.total_w - BORDER - DROPDOWN_W - 2
+    local y = settings.pos.y + BORDER + TITLE_BAR_H + 2
+
+    ui.dropdown_el.bg = make_bg(x, y, DROPDOWN_W, DROPDOWN_H, C_DROP_BG)
+
+    local active = settings.job or 'AUTO'
+    if not settings.job then active = 'AUTO' end
+
+    for idx, j in ipairs(JOB_LIST) do
+        local col = (idx - 1) % DROPDOWN_COLS
+        local row = math.floor((idx - 1) / DROPDOWN_COLS)
+        local cx = x + 2 + col * DROPDOWN_CELL_W
+        local cy = y + 2 + row * DROPDOWN_CELL_H
+        local is_active = (j == active)
+
+        ui.dropdown_el['c_' .. j] = make_bg(cx + 1, cy + 1, DROPDOWN_CELL_W - 2, DROPDOWN_CELL_H - 2,
+            is_active and C_DROP_CELL_ON or C_DROP_CELL_OFF)
+
+        -- Center the 3-letter job label
+        local label_w_px = #j * 6                   -- monospace approx
+        local label_x = cx + math.floor((DROPDOWN_CELL_W - label_w_px) / 2)
+        local txt_color = is_active and C_DROP_TXT_ON or C_DROP_TXT_OFF
+        ui.dropdown_el['t_' .. j] = make_text(j, label_x, cy + 4, txt_color, 11, is_active)
+
+        ui.dropdown_rect['c_' .. j] = { x = cx, y = cy, w = DROPDOWN_CELL_W, h = DROPDOWN_CELL_H, job = j }
+    end
+
+    for _, e in pairs(ui.dropdown_el) do show(e) end
+end
+
 local function destroy_window()
+    destroy_dropdown()
     for _, e in pairs(ui.el)   do destroy(e) end
     for _, r in ipairs(ui.rows) do
         destroy(r.header); destroy(r.bg); destroy(r.icon)
@@ -851,11 +920,15 @@ local function build_window()
         ui.rect['tab_'   .. key] = { x = tx, y = tab_y, w = tab_w, h = TAB_H }
     end
 
-    -- Job tag (right side of title bar)
+    -- Job tag (right side of title bar) — clickable to open the job picker
+    -- dropdown. The "*" suffix indicates an override is active (vs auto-
+    -- detected from main_job).
     local job = active_job()
     local jt_x = tb_x + tb_w - job_tag_w + 4
-    ui.el.job_tag = make_text('[' .. job .. ']', jt_x, tb_y + 7, C_JOB_TAG, 11, true)
-    -- (No click target — auto-detects current main job)
+    local tag_label = settings.job and ('[' .. job .. '*]') or ('[' .. job .. ']')
+    local tag_color = ui.dropdown_open and C_JOB_TAG_HOVER or C_JOB_TAG
+    ui.el.job_tag = make_text(tag_label, jt_x, tb_y + 7, tag_color, 11, true)
+    ui.rect.job_tag = { x = jt_x - 2, y = tb_y, w = job_tag_w - 4, h = TITLE_BAR_H }
 
     -- Body — reserve FOOTER_H at the bottom for the action buttons
     local body_y = tb_y + TITLE_BAR_H
@@ -1008,6 +1081,9 @@ local function build_window()
         if r.header then show(r.header) end
         if r.mats then for _, mt in ipairs(r.mats) do show(mt) end end
     end
+
+    -- Render dropdown LAST so it sits on top of everything
+    if ui.dropdown_open then build_dropdown() end
 end
 
 local function show_window()
@@ -1090,8 +1166,32 @@ windower.register_event('mouse', function(mtype, x, y, delta, blocked)
 
     -- LMB down
     if mtype == 1 then
+        -- Dropdown cell click first (it sits on top of everything)
+        if ui.dropdown_open then
+            for _, r in pairs(ui.dropdown_rect) do
+                if in_rect(x, y, r) then
+                    if r.job == 'AUTO' then
+                        settings.job = nil
+                        notify('Auto-detect job: ' .. active_job(), 158)
+                    else
+                        settings.job = r.job
+                        notify('Job override: ' .. r.job, 158)
+                    end
+                    config.save(settings)
+                    ui.dropdown_open = false
+                    ui.scroll = 0
+                    refresh_window()
+                    return true
+                end
+            end
+            -- Click outside dropdown closes it
+            ui.dropdown_open = false
+            build_window()
+            return true
+        end
+
         if in_rect(x, y, ui.rect.title_bar) then
-            -- Check tab clicks first
+            -- Tabs first
             for _, key in ipairs(TABS) do
                 if in_rect(x, y, ui.rect['tab_' .. key]) then
                     if settings.tab ~= key then
@@ -1102,6 +1202,12 @@ windower.register_event('mouse', function(mtype, x, y, delta, blocked)
                     end
                     return true
                 end
+            end
+            -- Job tag → open dropdown
+            if ui.rect.job_tag and in_rect(x, y, ui.rect.job_tag) then
+                ui.dropdown_open = true
+                build_window()
+                return true
             end
             ui.drag = { dx = x - settings.pos.x, dy = y - settings.pos.y }
             return true
