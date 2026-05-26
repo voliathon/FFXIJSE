@@ -127,8 +127,26 @@ local C_JOB_TAG_HOVER  = { 255, 255, 230, 160 }
 
 -- Tier mapping ARMOR-TYPE → upgrade chain available
 local TIER_ORDER  = { 'NQ', '+1', '+2', '+3', '+4' }
-local TABS        = { 'ARTIFACT', 'RELIC', 'EMPYREAN' }
-local TAB_LABELS  = { ARTIFACT = 'AF', RELIC = 'Relic', EMPYREAN = 'Empy' }
+local TABS        = { 'ARTIFACT', 'RELIC', 'EMPYREAN', 'CAPE' }
+local TAB_LABELS  = { ARTIFACT = 'AF', RELIC = 'Relic', EMPYREAN = 'Empy', CAPE = 'Cape' }
+
+-- Ambuscade cape per job (data from capetrader, by Lygre & Burntwaffle@Odin,
+-- BSD-licensed). Cape augments are done via the Gorpa-Masorpa NPC in Mhaura
+-- using Abdhaljs Thread / Dust / Sap / Dye. Use //capetrader for the
+-- automation; the Cape tab here is just visibility into what you own.
+local JOB_CAPE = {
+    war = "Cichol's Mantle",    mnk = "Segomo's Mantle",   whm = "Alaunus's Cape",
+    blm = "Taranus's Cape",     rdm = "Sucellos's Cape",   thf = "Toutatis's Cape",
+    pld = "Rudianos's Mantle",  drk = "Ankou's Mantle",    bst = "Artio's Mantle",
+    brd = "Intarabus's Cape",   rng = "Belenus's Cape",    sam = "Smertrios's Mantle",
+    nin = "Andartia's Mantle",  drg = "Brigantia's Mantle",smn = "Campestres's Cape",
+    blu = "Rosmerta's Cape",    cor = "Camulus's Mantle",  pup = "Visucius's Mantle",
+    dnc = "Senuna's Mantle",    sch = "Lugh's Cape",       geo = "Nantosuelta's Cape",
+    run = "Ogma's Cape",
+}
+local CAPE_AUG_ITEMS = {
+    "Abdhaljs Thread", "Abdhaljs Dust", "Abdhaljs Sap", "Abdhaljs Dye",
+}
 
 -- =============================================================================
 -- UI element factories
@@ -774,6 +792,39 @@ end
 local function compute_piece_states()
     local job = active_job()
     local armor = settings.tab
+
+    -- CAPE tab: single "piece" = the job's Ambuscade cape. The "materials"
+    -- list is repurposed to show the 4 augment items in your inventory.
+    -- count=0 so every item shows ✓ (you can't be "short" on augment items,
+    -- you just have what you have).
+    if armor == 'CAPE' then
+        local cape_name = JOB_CAPE[job:lower()]
+        if not cape_name then return {} end
+        local item_id = item_id_by_name(cape_name)
+        local locs = find_item_locations(cape_name)
+        local owned = (#locs > 0) and 'NQ' or nil
+        -- Also check if it's equipped
+        if not owned and item_id and find_equipped_slot(item_id) then
+            owned = 'NQ'
+        end
+        if not owned then return {} end   -- Cape not owned → empty state
+        local fake_mats = {}
+        for _, aug in ipairs(CAPE_AUG_ITEMS) do
+            table.insert(fake_mats, { name = aug, count = 0 })
+        end
+        return { {
+            piece = nil,
+            name  = cape_name,
+            owned = owned,
+            item_id = item_id,
+            next_tier = 'Augment',     -- not really a tier — drives "next" rendering
+            mats  = fake_mats,
+            ready = nil,                -- N/A for capes
+            is_cape = true,
+        } }
+    end
+
+    -- AF / Relic / Empyrean — standard piece list
     local data = (job_equipment[job] or {})[armor] or {}
     local out = {}
     for _, piece in ipairs(data) do
@@ -803,10 +854,11 @@ end
 
 -- Each owned piece takes 1 row when maxed, else 1 row + #mats sub-rows.
 -- (The left column is always 1 row — name + current tier. The right column
--- expands vertically into the material list.)
+-- expands vertically into the material list.) Cape rows get +1 ROW_H for
+-- the "use //capetrader" hint line.
 local function piece_block_height(p)
     if not p.mats then return PIECE_H end
-    local mat_count = #p.mats
+    local mat_count = #p.mats + (p.is_cape and 1 or 0)
     return math.max(PIECE_H, PIECE_H + (mat_count * ROW_H) - ROW_H + 4)
 end
 
@@ -952,8 +1004,11 @@ local function build_window()
     for _, p in ipairs(pieces) do
         if p.name == ui.selected_name then selected = p; break end
     end
-    local can_gather = selected ~= nil and selected.mats and #selected.mats > 0
-    local can_trade  = can_gather   -- same prereq
+    -- Gather/Trade only make sense for JSE upgrade pieces — capes use
+    -- the //capetrader workflow and shouldn't trigger the JSE trade flow.
+    local on_cape_tab = (settings.tab == 'CAPE')
+    local can_gather = (not on_cape_tab) and selected ~= nil and selected.mats and #selected.mats > 0
+    local can_trade  = can_gather
 
     ui.el.btn_gather_bg = make_bg(g_x, btn_y, btn_w, BTN_H,
         can_gather and C_BTN_GATHER_ON or C_BTN_GATHER_OFF)
@@ -972,16 +1027,23 @@ local function build_window()
     ui.rect.btn_trade = { x = t_x, y = btn_y, w = btn_w, h = BTN_H, enabled = can_trade }
 
     if #pieces == 0 then
-        -- Distinguish "no data" (no upgrade table for this job/armor)
-        -- from "you don't own any pieces of this set yet".
-        local has_data = job_equipment[job] and job_equipment[job][settings.tab]
         local msg
-        if not has_data or #has_data == 0 then
-            msg = 'No ' .. settings.tab:lower() .. ' data for ' .. job .. '.'
+        if settings.tab == 'CAPE' then
+            local cape_name = JOB_CAPE[job:lower()] or '?'
+            msg = 'Cape for ' .. job .. ': ' .. cape_name .. '\n'
+                .. '(You don\'t own this cape yet — get it from\n'
+                .. ' the Ambuscade reward NPC in Mhaura.)'
         else
-            msg = 'No ' .. settings.tab:lower() .. ' pieces owned on ' .. job
-                  .. ' yet.\n(' .. #has_data .. ' pieces exist for this set —\n'
-                  .. ' acquire one to see it here.)'
+            -- Distinguish "no data" (no upgrade table for this job/armor)
+            -- from "you don't own any pieces of this set yet".
+            local has_data = job_equipment[job] and job_equipment[job][settings.tab]
+            if not has_data or #has_data == 0 then
+                msg = 'No ' .. settings.tab:lower() .. ' data for ' .. job .. '.'
+            else
+                msg = 'No ' .. settings.tab:lower() .. ' pieces owned on ' .. job
+                      .. ' yet.\n(' .. #has_data .. ' pieces exist for this set —\n'
+                      .. ' acquire one to see it here.)'
+            end
         end
         ui.el.empty = make_text(msg, tb_x + PAD, body_y + PAD, C_SUMMARY, 11)
         for _, e in pairs(ui.el) do show(e) end
@@ -1016,7 +1078,10 @@ local function build_window()
 
             -- ===== LEFT: icon + name + status =====
             local left_icon, left_color
-            if not p.next_tier then
+            if p.is_cape then
+                left_icon  = '◆'           -- cape indicator (no tier system)
+                left_color = C_PIECE_READY
+            elseif not p.next_tier then
                 left_icon  = '✓'           -- maxed
                 left_color = C_PIECE_MAX
             elseif p.ready then
@@ -1046,7 +1111,23 @@ local function build_window()
 
             -- ===== RIGHT: materials list or MAXED =====
             local mat_texts = {}
-            if not p.next_tier then
+            if p.is_cape then
+                -- Cape tab: show augment-item inventory counts (no x/y
+                -- requirement — you can't be "short", you just have what
+                -- you have) + a hint to use //capetrader for the actual
+                -- augmentation.
+                for i, mat in ipairs(p.mats) do
+                    local have  = count_material(mat.name)
+                    local where = bag_summary(mat.name)
+                    local color = (have > 0) and C_MAT_HAVE or C_SUMMARY
+                    local line  = string.format('%s x%d  %s', mat.name, have, where)
+                    local mt = make_text(line, right_x, cur_y + (i - 1) * ROW_H, color, 10)
+                    table.insert(mat_texts, mt)
+                end
+                local hint = make_text('Use //capetrader prep / go for augments',
+                    right_x, cur_y + (#p.mats) * ROW_H, C_SUMMARY, 9)
+                table.insert(mat_texts, hint)
+            elseif not p.next_tier then
                 local mt = make_text('MAXED (+4)', right_x, cur_y + 8, C_PIECE_MAX, 11, true)
                 table.insert(mat_texts, mt)
             elseif p.mats and #p.mats > 0 then
@@ -1309,6 +1390,8 @@ windower.register_event('addon command', function(cmd, ...)
         settings.tab = 'RELIC'; ui.scroll = 0; config.save(settings); refresh_window()
     elseif cmd == 'empy' or cmd == 'empyrean' then
         settings.tab = 'EMPYREAN'; ui.scroll = 0; config.save(settings); refresh_window()
+    elseif cmd == 'cape' then
+        settings.tab = 'CAPE'; ui.scroll = 0; config.save(settings); refresh_window()
     elseif cmd == 'job' then
         local j = (args[1] or ''):upper()
         if j == '' or j == 'AUTO' or j == 'CLEAR' then
