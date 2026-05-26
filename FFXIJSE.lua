@@ -71,8 +71,10 @@ local ICON_SIZE    = 32                  -- per-piece icon dimensions
 local PIECE_H      = ICON_SIZE + 6       -- min piece row height (icon-driven)
 local SCROLL_BTN_H = 20
 local PAD          = 8
+local FOOTER_H     = 38                  -- bottom button strip
+local BTN_H        = 26
 local PANEL_W      = 580                 -- wider to fit icon + name + materials
-local PANEL_BODY_H = 480                 -- FIXED body height; content scrolls inside
+local PANEL_BODY_H = 460                 -- FIXED body height; content scrolls inside
 
 local C_BORDER     = { 220, 70,  130, 200 }
 local C_TITLE_BG   = { 240, 30,  60,  120 }
@@ -94,6 +96,14 @@ local C_SCROLL_BG  = { 200, 40,  50,  90  }
 local C_SCROLL_TXT = { 255, 255, 255, 255 }
 local C_SCROLL_OFF = { 80,  40,  50,  90  }
 local C_SCROLL_TXT_OFF = { 100, 200, 200, 200 }
+-- Footer button colors
+local C_SEL_HIGHLIGHT = { 100, 200, 150, 50 }  -- selected piece row tint
+local C_BTN_GATHER_ON  = { 220, 50,  120, 60 }  -- green, ready
+local C_BTN_GATHER_OFF = { 130, 30,  60,  35 }  -- dim, no piece selected
+local C_BTN_TRADE_ON   = { 220, 110, 80,  50 }  -- amber, ready
+local C_BTN_TRADE_OFF  = { 130, 60,  40,  30 }  -- dim
+local C_BTN_TXT_ON     = { 255, 240, 240, 240 }
+local C_BTN_TXT_OFF    = { 200, 160, 160, 160 }
 
 -- Tier mapping ARMOR-TYPE → upgrade chain available
 local TIER_ORDER  = { 'NQ', '+1', '+2', '+3', '+4' }
@@ -247,6 +257,104 @@ local function can_upgrade(mats)
 end
 
 -- =============================================================================
+-- Bag IDs (Windower convention) — used for moving items between containers
+-- =============================================================================
+-- These are the FFXI internal storage IDs. windower.ffxi.put_item(bag, slot,
+-- count) moves the stack to the inventory bag.
+local BAG = {
+    inventory  = 0,
+    safe       = 1,
+    storage    = 2,
+    temporary  = 3,
+    locker     = 4,
+    satchel    = 5,
+    sack       = 6,
+    case       = 7,
+    wardrobe   = 8,
+    safe2      = 9,
+    wardrobe2  = 10,
+    wardrobe3  = 11,
+    wardrobe4  = 12,
+    wardrobe5  = 13,
+    wardrobe6  = 14,
+    wardrobe7  = 15,
+    wardrobe8  = 16,
+}
+
+-- Mog-house-only bags. Player can only access these while standing in a
+-- mog house — pull-from attempts elsewhere fail silently.
+local MOG_ONLY = {
+    [BAG.safe]    = 'Mog Safe',
+    [BAG.safe2]   = 'Mog Safe 2',
+    [BAG.storage] = 'Storage',
+    [BAG.locker]  = 'Locker',
+}
+
+-- Accessible-from-anywhere bags (we'll scan these freely)
+local FIELD_BAGS = {
+    BAG.inventory, BAG.wardrobe, BAG.wardrobe2, BAG.wardrobe3, BAG.wardrobe4,
+    BAG.wardrobe5, BAG.wardrobe6, BAG.wardrobe7, BAG.wardrobe8,
+    BAG.satchel,   BAG.sack,      BAG.case,
+}
+
+-- Detect if player is in a mog house (rough heuristic — mog-only bags appear
+-- non-zero in get_items() output when in mog house).
+local function in_mog_house()
+    local items = windower.ffxi.get_items()
+    if not items then return false end
+    -- Mog safe is enabled (non-zero max) only when in a mog house instance
+    return items[BAG.safe] and items[BAG.safe].enabled
+end
+
+-- Walk every bag and find slots holding the given item name.
+-- Returns list of {bag_id, slot_id, count, mog_only}.
+local function find_item_locations(item_name)
+    local target_id = item_id_by_name(item_name)
+    if not target_id then return {} end
+
+    local out = {}
+    local items = windower.ffxi.get_items()
+    if not items then return out end
+
+    local function scan(bag_id)
+        local bag = items[bag_id]
+        if not bag or type(bag) ~= 'table' then return end
+        for slot = 1, (bag.max or 80) do
+            local it = bag[slot]
+            if it and type(it) == 'table' and it.id == target_id and (it.count or 0) > 0 then
+                table.insert(out, {
+                    bag_id = bag_id,
+                    slot   = slot,
+                    count  = it.count,
+                    mog_only = MOG_ONLY[bag_id] ~= nil,
+                })
+            end
+        end
+    end
+
+    -- Field bags first
+    for _, b in ipairs(FIELD_BAGS) do scan(b) end
+    -- Then mog-only
+    for b, _ in pairs(MOG_ONLY) do scan(b) end
+    return out
+end
+
+-- Count free slots in main inventory
+local function inventory_free_slots()
+    local items = windower.ffxi.get_items()
+    if not items or not items.inventory then return 0 end
+    local inv = items.inventory
+    local used = 0
+    for slot = 1, (inv.max or 80) do
+        local it = inv[slot]
+        if it and type(it) == 'table' and (it.count or 0) > 0 then
+            used = used + 1
+        end
+    end
+    return (inv.max or 80) - used
+end
+
+-- =============================================================================
 -- UI state + element refs
 -- =============================================================================
 local ui = {
@@ -260,7 +368,224 @@ local ui = {
     -- Per-piece expanded materials show on rebuild — cache the rendered piece
     -- list so scroll math is consistent.
     cached_pieces = nil,
+    -- Selected piece (for the Gather / Trade buttons to act on). Stored as
+    -- piece name + tier since piece-state objects rebuild every refresh.
+    selected_name = nil,
 }
+
+-- =============================================================================
+-- Gather Items: walk all bags, move material stacks to inventory
+-- =============================================================================
+local function notify(msg, color)
+    windower.add_to_chat(color or 207, '[FFXIJSE] ' .. msg)
+end
+
+-- Plan + execute a gather for the materials of one piece's next upgrade.
+-- - Skips materials already at-target count in main inventory.
+-- - For materials in mog-only bags when player isn't in a mog house,
+--   reports "please go to mog house first" and skips that material.
+-- - Checks free inventory slots up front; if insufficient, reports and bails.
+local function gather_for_piece(piece_state)
+    if not piece_state then notify('No piece selected. Click a row first.', 167); return end
+    if not piece_state.mats or #piece_state.mats == 0 then
+        notify('"' .. piece_state.name .. '" has no pending upgrade materials.', 167); return
+    end
+
+    local in_mog = in_mog_house()
+    local mog_blocked = {}     -- materials sitting in mog-only bags
+    local moves = {}           -- planned moves: {bag_id, slot, count}
+    local still_need = {}      -- per-material remaining need (after inv-on-hand)
+
+    -- For each material, see how much we already have in main inventory
+    local items = windower.ffxi.get_items() or {}
+    local function count_in_inv(target_id)
+        local inv = items.inventory; if not inv then return 0 end
+        local total = 0
+        for slot = 1, (inv.max or 80) do
+            local it = inv[slot]
+            if it and type(it) == 'table' and it.id == target_id then
+                total = total + (it.count or 0)
+            end
+        end
+        return total
+    end
+
+    for _, m in ipairs(piece_state.mats) do
+        -- Skip currency-only materials (Rem's Tale Ch.X, Apollyon Units, etc.)
+        -- — these aren't physical items in any bag, so there's nothing to move.
+        if get_currency_name(m.name) then
+            -- noop; currency tracked separately
+        else
+            local target_id = item_id_by_name(m.name)
+            if target_id then
+                local have_inv = count_in_inv(target_id)
+                local need = m.count - have_inv
+                if need > 0 then
+                    -- Pull from field bags first
+                    local locs = find_item_locations(m.name)
+                    local taken = 0
+                    for _, loc in ipairs(locs) do
+                        if taken >= need then break end
+                        if loc.bag_id == BAG.inventory then
+                            -- already in inv, skip
+                        elseif loc.mog_only and not in_mog then
+                            mog_blocked[m.name] = (mog_blocked[m.name] or 0) + loc.count
+                        else
+                            local take = math.min(loc.count, need - taken)
+                            table.insert(moves, {
+                                bag_id = loc.bag_id, slot = loc.slot, count = take,
+                                name = m.name,
+                            })
+                            taken = taken + take
+                        end
+                    end
+                    if taken + have_inv < m.count then
+                        still_need[m.name] = m.count - have_inv - taken
+                    end
+                end
+            end
+        end
+    end
+
+    if #moves == 0 then
+        -- Nothing to move — either everything already in inv, or everything
+        -- blocked / missing
+        if next(mog_blocked) then
+            notify('Materials in mog house storage. Please go to your mog house first:', 167)
+            for name, c in pairs(mog_blocked) do
+                notify('  ' .. name .. ' (' .. c .. ' in safe/locker/storage)', 167)
+            end
+        elseif next(still_need) then
+            notify('Missing materials (none found in any storage):', 167)
+            for name, c in pairs(still_need) do
+                notify('  ' .. name .. ' x' .. c, 167)
+            end
+        else
+            notify('All materials already in inventory.', 158)
+        end
+        return
+    end
+
+    -- Make sure we have enough inventory slots for incoming stacks
+    local free = inventory_free_slots()
+    if free < #moves then
+        notify(('Inventory full — need %d more free slot(s) for %d material stack(s).')
+               :format(#moves - free, #moves), 167)
+        return
+    end
+
+    -- Execute moves (Windower's put_item moves the slot into main inventory)
+    notify(('Gathering %d stack(s) for %s...'):format(#moves, piece_state.name), 158)
+    for _, mv in ipairs(moves) do
+        windower.ffxi.put_item(mv.bag_id, mv.slot, mv.count)
+        notify(('  + %s x%d'):format(mv.name, mv.count), 160)
+    end
+
+    -- Surface any still-blocked items so the user knows what's left
+    if next(mog_blocked) then
+        notify('Still in mog house storage (go to mog house for these):', 167)
+        for name, c in pairs(mog_blocked) do notify('  ' .. name .. ' x' .. c, 167) end
+    end
+    if next(still_need) then
+        notify('Still missing (not in any storage):', 167)
+        for name, c in pairs(still_need) do notify('  ' .. name .. ' x' .. c, 167) end
+    end
+end
+
+-- =============================================================================
+-- Trade to NPC: open trade with current target and stage the items
+-- =============================================================================
+-- Sends 0x032 (Trade Request) to open the trade window with the targeted
+-- NPC, then 0x034 (Trade Offer) for each material stack to fill the trade
+-- slots. Does NOT send the 0x033 confirm — user must press OK manually.
+local function u8(n)  return string.char(n % 256) end
+local function u16(n) return u8(n) .. u8(math.floor(n / 256)) end
+local function u32(n)
+    return u8(n) .. u8(math.floor(n / 256)) .. u8(math.floor(n / 65536)) .. u8(math.floor(n / 16777216))
+end
+
+local function trade_for_piece(piece_state)
+    if not piece_state then notify('No piece selected. Click a row first.', 167); return end
+    if not piece_state.mats or #piece_state.mats == 0 then
+        notify('"' .. piece_state.name .. '" has no pending upgrade materials.', 167); return
+    end
+
+    local target = windower.ffxi.get_mob_by_target('t')
+    if not target then
+        notify('No target selected. Target the upgrade NPC first, then click Trade.', 167); return
+    end
+    if target.spawn_type ~= 16 then   -- 16 = NPC
+        notify('Target must be an NPC. Currently targeting: ' .. (target.name or '?'), 167); return
+    end
+
+    -- Build the list of inventory slots to put in the trade window
+    local items = windower.ffxi.get_items()
+    if not items or not items.inventory then notify('Inventory not available.', 167); return end
+    local inv = items.inventory
+
+    local trade_stacks = {}    -- list of {item_id, count, inv_slot}
+    local still_need = {}
+    for _, m in ipairs(piece_state.mats) do
+        if get_currency_name(m.name) then
+            -- currencies don't go through trade — they're consumed automatically
+        else
+            local target_id = item_id_by_name(m.name)
+            if target_id then
+                -- Find this item in inventory; build stacks until satisfied
+                local needed = m.count
+                for slot = 1, (inv.max or 80) do
+                    if needed <= 0 then break end
+                    local it = inv[slot]
+                    if it and type(it) == 'table' and it.id == target_id and (it.count or 0) > 0 then
+                        local take = math.min(it.count, needed)
+                        table.insert(trade_stacks, { item_id = target_id, count = take, inv_slot = slot, name = m.name })
+                        needed = needed - take
+                    end
+                end
+                if needed > 0 then still_need[m.name] = needed end
+            end
+        end
+    end
+
+    if next(still_need) then
+        notify('Some materials are NOT in main inventory — run Gather first:', 167)
+        for name, c in pairs(still_need) do notify('  ' .. name .. ' x' .. c, 167) end
+        return
+    end
+
+    if #trade_stacks == 0 then
+        notify('No physical items needed for this upgrade (currencies only).', 158); return
+    end
+
+    if #trade_stacks > 8 then
+        notify(('Trade only fits 8 stacks; this upgrade needs %d.'):format(#trade_stacks), 167); return
+    end
+
+    -- Send packets
+    local function build_packet(id, body)
+        local size = math.ceil((4 + #body) / 4)
+        return u16(id + (size * 256 * 64)) .. u32(0) .. body
+    end
+
+    -- 0x032 Trade Request
+    local req = u32(target.id) .. u16(target.index) .. u8(0) .. u8(0)
+    windower.packets.inject_outgoing(0x032, build_packet(0x032, req))
+
+    notify(('Trade window opening with %s (%d stacks)...'):format(target.name, #trade_stacks), 158)
+
+    -- Stagger the trade-slot fills so the server processes them in order
+    for i, st in ipairs(trade_stacks) do
+        coroutine.schedule(function()
+            local body = u32(st.count) .. u16(st.item_id) .. u8(st.inv_slot) .. u8(i - 1)
+            windower.packets.inject_outgoing(0x034, build_packet(0x034, body))
+            notify(('  slot %d: %s x%d'):format(i - 1, st.name, st.count), 160)
+        end, 0.3 * i)
+    end
+
+    coroutine.schedule(function()
+        notify('Trade staged. Press OK in the trade window to confirm.', 158)
+    end, 0.3 * (#trade_stacks + 1))
+end
 
 -- Get the list of pieces to show, with state per piece. Returns array of:
 --   { piece, owned_tier, next_tier, can_upgrade, mats_for_next }
@@ -374,11 +699,44 @@ local function build_window()
     ui.el.job_tag = make_text('[' .. job .. ']', jt_x, tb_y + 7, C_JOB_TAG, 11, true)
     -- (No click target — auto-detects current main job)
 
-    -- Body
+    -- Body — reserve FOOTER_H at the bottom for the action buttons
     local body_y = tb_y + TITLE_BAR_H
-    local body_h = H - BORDER - TITLE_BAR_H - BORDER
+    local body_h = H - BORDER - TITLE_BAR_H - BORDER - FOOTER_H
     ui.el.body_bg = make_bg(tb_x, body_y, tb_w, body_h, C_BODY_BG)
     ui.rect.body = { x = tb_x, y = body_y, w = tb_w, h = body_h }
+
+    -- Footer area + two buttons (Gather Items + Trade to NPC)
+    local footer_y = body_y + body_h
+    ui.el.footer_bg = make_bg(tb_x, footer_y, tb_w, FOOTER_H, C_TITLE_BG)
+
+    local btn_w = math.floor((tb_w - PAD * 3) / 2)
+    local btn_y = footer_y + math.floor((FOOTER_H - BTN_H) / 2)
+    local g_x = tb_x + PAD
+    local t_x = g_x + btn_w + PAD
+
+    -- Find the currently-selected piece (if any) — used to decide button colors
+    local selected = nil
+    for _, p in ipairs(pieces) do
+        if p.name == ui.selected_name then selected = p; break end
+    end
+    local can_gather = selected ~= nil and selected.mats and #selected.mats > 0
+    local can_trade  = can_gather   -- same prereq
+
+    ui.el.btn_gather_bg = make_bg(g_x, btn_y, btn_w, BTN_H,
+        can_gather and C_BTN_GATHER_ON or C_BTN_GATHER_OFF)
+    ui.el.btn_gather_text = make_text(
+        'Gather Items',
+        g_x + math.floor(btn_w / 2) - 38, btn_y + 6,
+        can_gather and C_BTN_TXT_ON or C_BTN_TXT_OFF, 11, true)
+    ui.rect.btn_gather = { x = g_x, y = btn_y, w = btn_w, h = BTN_H, enabled = can_gather }
+
+    ui.el.btn_trade_bg = make_bg(t_x, btn_y, btn_w, BTN_H,
+        can_trade and C_BTN_TRADE_ON or C_BTN_TRADE_OFF)
+    ui.el.btn_trade_text = make_text(
+        'Trade to NPC',
+        t_x + math.floor(btn_w / 2) - 38, btn_y + 6,
+        can_trade and C_BTN_TXT_ON or C_BTN_TXT_OFF, 11, true)
+    ui.rect.btn_trade = { x = t_x, y = btn_y, w = btn_w, h = BTN_H, enabled = can_trade }
 
     if #pieces == 0 then
         -- Distinguish "no data" (no upgrade table for this job/armor)
@@ -417,6 +775,12 @@ local function build_window()
 
         -- Only render pieces that intersect the visible body band
         if block_bot > body_top and block_top < body_bot then
+            -- Selected-row highlight (subtle tint behind the row)
+            local row_hl = nil
+            if ui.selected_name == p.name then
+                row_hl = make_bg(icon_x - 2, cur_y - 2, tb_w - PAD * 2 + 4, block_h, C_SEL_HIGHLIGHT)
+            end
+
             -- ===== LEFT: icon + name + status =====
             local left_icon, left_color
             if not p.next_tier then
@@ -467,7 +831,11 @@ local function build_window()
                 table.insert(mat_texts, mt)
             end
 
-            table.insert(ui.rows, { icon = icon, header = left_text, mats = mat_texts })
+            table.insert(ui.rows, {
+                bg = row_hl, icon = icon, header = left_text, mats = mat_texts,
+                rect = { x = icon_x, y = cur_y, w = tb_w - PAD * 2, h = block_h },
+                name = p.name,
+            })
         end
 
         cur_y = cur_y + block_h
@@ -476,6 +844,7 @@ local function build_window()
 
     for _, e in pairs(ui.el) do show(e) end
     for _, r in ipairs(ui.rows) do
+        if r.bg then show(r.bg) end       -- selection highlight (under everything)
         if r.icon then show(r.icon) end
         if r.header then show(r.header) end
         if r.mats then for _, mt in ipairs(r.mats) do show(mt) end end
@@ -578,6 +947,48 @@ windower.register_event('mouse', function(mtype, x, y, delta, blocked)
             ui.drag = { dx = x - settings.pos.x, dy = y - settings.pos.y }
             return true
         end
+
+        -- Footer buttons
+        if ui.rect.btn_gather and in_rect(x, y, ui.rect.btn_gather) then
+            if ui.rect.btn_gather.enabled then
+                local sel = nil
+                for _, p in ipairs(ui.cached_pieces or {}) do
+                    if p.name == ui.selected_name then sel = p; break end
+                end
+                gather_for_piece(sel)
+                -- After a moment refresh the window so material counts update
+                coroutine.schedule(refresh_window, 1)
+            else
+                notify('Click a piece in the list first to select it.', 167)
+            end
+            return true
+        end
+        if ui.rect.btn_trade and in_rect(x, y, ui.rect.btn_trade) then
+            if ui.rect.btn_trade.enabled then
+                local sel = nil
+                for _, p in ipairs(ui.cached_pieces or {}) do
+                    if p.name == ui.selected_name then sel = p; break end
+                end
+                trade_for_piece(sel)
+            else
+                notify('Click a piece in the list first to select it.', 167)
+            end
+            return true
+        end
+
+        -- Click on a piece row to select it
+        for _, r in ipairs(ui.rows) do
+            if r.rect and in_rect(x, y, r.rect) then
+                if ui.selected_name == r.name then
+                    ui.selected_name = nil   -- click again = deselect
+                else
+                    ui.selected_name = r.name
+                end
+                build_window()   -- rebuild to update button enabled state + highlight
+                return true
+            end
+        end
+
         return true
     end
 
