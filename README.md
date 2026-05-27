@@ -77,13 +77,73 @@ Below each non-maxed piece, the required materials list:
 - `✓` = you have enough
 - `✗` = you need more
 
+## Capes tab
+
+The 4th tab (**Capes**) tracks the Ambuscade JSE cape for the
+**currently-selected job** (Cichol's Mantle for WAR, Alaunus's Cape
+for WHM, etc. — the Mhaura Gorpa-Masorpa cape, one per job). It
+walks every storage and lists **every copy of that cape you own**,
+so if you keep two Alaunus's Capes with different augment builds
+they both show up (disambiguated with `(#1)`, `(#2)`).
+
+For each cape it reads the augments via `extdata.decode()` and shows
+per-slot status. Long augment strings are word-wrapped to multiple
+lines so nothing runs off the right edge.
+
+```
+┌─ FFXIJSE ───────────────[AF][Relic][Empy][Capes]─────────────┐
+│ ✗ Alaunus's Cape (#2)  3/4 filled                            │
+│   ✓ MND+20  [Thread MAX]                                     │
+│   ✗ Mag. Acc.+20 /Mag. Dmg.+20  [Dust → Abdhaljs Dust]       │
+│       Abdhaljs Dust → {Inv 4, Case 2}                        │
+│   ✓ "Fast Cast"+10  [Sap MAX]                                │
+│   (1 Augment Available)                                      │
+│ ✓ Alaunus's Cape (#3)  FULL (4/4 MAX)                        │
+│   ✓ MND+20  [Thread MAX]                                     │
+│   ✓ Accuracy+20 Attack+20  [Dust MAX]                        │
+│   ✓ STR+10  [Dye MAX]                                        │
+│   ✓ "Cure" potency+10  [Sap MAX]                             │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Per-line meaning:
+- **Green `✓ ... [Thread MAX]`** — augment is at the category maximum.
+- **Red `✗ ... [Thread → Abdhaljs Thread]`** — augment is below max;
+  the bracketed item is what to bring to Gorpa-Masorpa to upgrade it.
+- **Grey sub-line `Abdhaljs Dust → {Inv 4, Case 2}`** — shown under each
+  non-max augment. Lists the bags holding the upgrade item and how
+  many you have, so you can see at a glance whether you're ready to
+  upgrade or still need to farm. `(none in storage)` if you have zero.
+- **Red `(N Augments Available)`** — footer below the last augment;
+  this many slots are unfilled and can still take a new augment item.
+
+Header summary next to the cape name (and job tag):
+- `FULL (4/4 MAX)` — every slot is filled and at the category max.
+- `N/4 MAX` — all 4 slots filled, N of them at max.
+- `N/4 filled` — N slots have augments; the rest are empty.
+
+Slot → item mapping (matches capetrader's order):
+1. **Thread** → Abdhaljs Thread (stats: HP/MP, STR/DEX/VIT/AGI/INT/MND/CHR)
+2. **Dust**   → Abdhaljs Dust   (combat: acc/atk, racc/ratk, macc/mdmg, eva/meva)
+3. **Dye**    → Abdhaljs Dye    (secondary stats — same stat pool, smaller cap)
+4. **Sap**    → Abdhaljs Sap    (effects: WSD, crit, STP, DA, haste, dual wield, etc.)
+
+The job dropdown filters the Capes tab the same way it filters
+AF/Relic/Empy — pick WHM and you see your Alaunus's Capes only.
+Switch jobs via the `[JOB ▼]` dropdown to inspect a different cape.
+
+Reference data (max values and category match rules) sourced from
+BG-Wiki's JSE Capes page. FFXIJSE only reads the cape — it doesn't
+trade for you. Use `//capetrader` for the actual augment automation
+(or the in-game NPC at Mhaura).
+
 ## Commands
 
 | Command | What |
 |---|---|
 | `//fj` (or `//ffxijse`) | Toggle the window (same as O key) |
 | `//fj show` / `//fj hide` | Explicit show/hide |
-| `//fj af` / `//fj relic` / `//fj empy` | Switch tab |
+| `//fj af` / `//fj relic` / `//fj empy` / `//fj capes` | Switch tab |
 | `//fj job <JOB>` | Override displayed job (e.g. `//fj job war`) |
 | `//fj job auto` | Clear override; track current main job |
 | `//fj refresh` | Re-scan inventory + currency |
@@ -102,6 +162,84 @@ Same as the original JSE:
 - Per-character data file written under `data/` (gitignored)
 - Cross-character mule check is NOT yet ported from JSE's `//jseall`
   command — TODO
+
+### Original Empyrean (lvl 85 Magian Trial era)
+
+The base JSE data files only track **Reforged** Empyrean (Beckoner's,
+Boii, Bhikku, Wicce, ...). FFXIJSE adds a supplementary file
+`jobs/_original_empyrean.lua` that registers the **Original** Empyrean
+sets from the Abyssea / Magian Trial era (caps at +2):
+
+- WAR Ravager's · MNK Tantra · WHM Orison · BLM Goetia · RDM Estoqueur's
+- THF Raider's · PLD Creed · DRK Bale · BST Ferine · BRD Aoidos'
+- RNG Sylvan · SAM Unkai · NIN Iga · DRG Lancer's · SMN Caller's
+- BLU Mavi · COR Navarch's · PUP Cirque · DNC Charis · SCH Savant's
+
+GEO and RUN have no Original Empyrean tier (post-Adoulin jobs).
+
+These appear in the **Empy tab** alongside the Reforged pieces so you
+can see all your Empyrean armor in one list. Each Original piece shows
+the cross-set conversion to its Reforged equivalent — e.g.:
+
+```
+✗ Caller's Horn +2  → Beckoner's Horn
+    Rem's Tale Ch.1  3/5  [Inv 3]
+    Carabosse's Gem  0/1
+    Phoenix Feather  2/1  ✓
+```
+
+For each tier, the addon shows the practical upgrade recipe:
+
+```
+✗ Caller's Horn
+    Caller's Seal: Head  3/8  [Sat]
+
+✗ Caller's Horn +1  → Beckoner's Horn
+    Rem's Tale Ch.1   4/10  [Inv]
+    Carabosse's Gem   0/1
+    Phoenix Feather   2/1   ✓  [Inv]
+
+✗ Caller's Horn +2  → Beckoner's Horn
+    Rem's Tale Ch.1   3/5   [Inv]
+    Carabosse's Gem   0/1
+    Phoenix Feather   2/1   ✓  [Inv]
+```
+
+- **NQ → +1**: real Magian Trial recipe — 8 of `[Set] Seal: [Slot]`
+  (10 for body). Set name varies per job: Caller's Seal: Head,
+  Ravager's Seal: Head, Tantra Seal: Head, etc.
+- **+1 → Reforged NQ**: cross-set conversion (the practical path),
+  x10 Rem's Tale + slot ingredient + job-specific ingredient.
+- **+2 → Reforged NQ**: same recipe but x5 Rem's Tale instead.
+
+The +1 → +2 Magian step (Stone/Coin of Vision/Ardor/etc.) is
+intentionally skipped — at +1 or +2, the addon recommends reforging
+to the modern Reforged NQ rather than continuing the obsolete Magian
+chain. That matches the path BG-Wiki recommends for modern play.
+
+Recipe components (universal across all 20 jobs, per BG-Wiki):
+
+| Slot | Rem's Tale | Slot Ingredient |
+|---|---|---|
+| Head  | Ch.1 | Phoenix Feather |
+| Body  | Ch.2 | Malboro Fiber   |
+| Hands | Ch.3 | Beetle Blood    |
+| Legs  | Ch.4 | Damascene Cloth |
+| Feet  | Ch.5 | Oxblood         |
+
+Job ingredient (varies per job — Carabosse's Gem for SMN/BST/PUP,
+Helm of Briareus for WAR/DRK, Orthrus's Claw for WHM, etc.) — see
+`jobs/_original_empyrean.lua` for the full per-job table.
+
+Set names + conversion recipes sourced from BG-Wiki (Category:
+Reforged_Empyrean_Armor and Category:Empyrean_Armor).
+
+### Diag command
+
+If a piece you own isn't showing up, run `//fj diag <substring>` to
+dump every storage entry whose name matches — useful for verifying
+the addon is reading items correctly and the names align with the
+data files.
 
 ## Credits
 

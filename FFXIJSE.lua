@@ -37,6 +37,13 @@ local icon_handler = require('libs/icon_handler')
 -- augment strings off an Ambuscade cape (Capes tab).
 local extdata = require('extdata')
 
+-- Per-slot augment max table — copied verbatim from capetrader's maxAugMap.lua
+-- (Lygre & Burntwaffle@Odin, BSD). Keyed by "<itemtype><stat>" prefix; each
+-- entry has a max value plus must/can't-contain substrings used to match an
+-- augment string back to its category. Source of category values:
+-- https://www.bg-wiki.com/ffxi/Category:JSE_Capes (Mhaura JSE capes).
+local cape_aug_max = require('libs/cape_aug_max')
+
 -- Globals (NOT local) — Nalfey's data modules (inventory.lua, etc.) reference
 -- these as globals (no `local` keyword) so we have to expose them globally
 -- here too. Don't change to `local` or inventory.lua errors out with
@@ -51,6 +58,121 @@ slips = require('slips')
 job_equipment = require('job_equipment')
 currency      = require('currency')
 inventory     = require('inventory')
+
+-- Original Empyrean (lvl 85 Magian Trial era) data — not in Nalfey's base
+-- job files because they only track Reforged Empyrean (lvl 109+). Merge
+-- the original pieces (Caller's, Ravager's, Tantra, ...) into each job's
+-- EMPYREAN list so they show up alongside Beckoner's, Boii, Bhikku, etc.
+-- in the Empy tab. Set names + piece names sourced from BG-Wiki.
+do
+    local original_empy = require('jobs/_original_empyrean')
+    for job_key, pieces in pairs(original_empy) do
+        local jdata = job_equipment[job_key]
+        if jdata and jdata.EMPYREAN then
+            for _, piece in ipairs(pieces) do
+                table.insert(jdata.EMPYREAN, piece)
+            end
+        end
+    end
+end
+
+-- Original AF (lvl 50-75 Artifact Armor) data — Fighter's, Healer's,
+-- Wizard's, Evoker's etc. Merge into each job's ARTIFACT list so they
+-- show up alongside the Reforged AF (Pummeler's / Theophany / Spaekona's
+-- / Convoker's etc.) in the AF tab. Each piece has the cross-set
+-- conversion recipe to its Reforged equivalent, with both NQ→Reforged
+-- (x10 Rem's Tale) and +1→Reforged (x5 Rem's Tale) paths.
+-- Set names + piece names + recipes sourced from BG-Wiki.
+do
+    local original_af = require('jobs/_original_af')
+    for job_key, pieces in pairs(original_af) do
+        local jdata = job_equipment[job_key]
+        if jdata and jdata.ARTIFACT then
+            for _, piece in ipairs(pieces) do
+                table.insert(jdata.ARTIFACT, piece)
+            end
+        end
+    end
+end
+
+-- =============================================================================
+-- Auto-populate piece aliases from res.items
+-- =============================================================================
+-- The data files include hand-written abbreviations (e.g. "Skulk. Bonnet")
+-- for FFXI's 16-char inventory display. Many of mine were guesses and got
+-- the wrong prefix — e.g. "Rd." for Raider's instead of "Raid.", "Svnt."
+-- for Savant's instead of "Sav.", "Syl." for Sylvan instead of "Sylvan".
+-- Wrong abbreviations mean highest_owned_tier silently fails to match the
+-- player's items even though they're sitting right there in storage.
+--
+-- Robust fix: walk every piece at addon startup, look each name+tier up
+-- in res.items by english match, and add the actual inventory `name`
+-- field as an alias. This eliminates the abbreviation-guessing class of
+-- bugs entirely — FFXI's own item resource is the source of truth.
+do
+    local TIER_SUFFIXES = { '', ' +1', ' +2', ' +3', ' +4' }
+
+    -- Windower's resources library exposes two english fields:
+    --   item.english     → maps to `en`  = inventory display form, which
+    --                      may be abbreviated ("Raid. Bonnet +2") if the
+    --                      full name wouldn't fit in 16 chars.
+    --   item.english_log → maps to `enl` = lowercased FULL english name
+    --                      ("raider's bonnet +2"). This is the only place
+    --                      the unabbreviated long form is stored.
+    --
+    -- My data files use the long form ("Raider's Bonnet") as the primary
+    -- alias, so we look up via english_log (the only field guaranteed to
+    -- contain the long form). The value we record is item.english — the
+    -- actual inventory short name, which is what we ultimately need to
+    -- match against in highest_owned_tier.
+    local longname_to_short = {}
+    for _, item in pairs(res.items) do
+        if item.english_log and item.english then
+            longname_to_short[item.english_log] = item.english
+        end
+    end
+
+    local function add_aliases(names)
+        if not names or #names == 0 then return end
+        local seen = {}
+        for _, n in ipairs(names) do seen[n] = true end
+
+        -- Use every existing alias as a possible english_log lookup key so
+        -- the search succeeds even if names[1] doesn't match FFXI exactly
+        -- (e.g. if data uses the short form like "Skulk. Bonnet" as the
+        -- primary). We snapshot the original count up front because we
+        -- append to `names` during the loop.
+        local original_count = #names
+        for i = 1, original_count do
+            local base_key = names[i]
+            for _, tier in ipairs(TIER_SUFFIXES) do
+                local probe = (base_key .. tier):lower()
+                local short = longname_to_short[probe]
+                if short then
+                    if not seen[short] then
+                        table.insert(names, short); seen[short] = true
+                    end
+                    -- Strip the " +N" suffix so the base abbreviation also
+                    -- becomes a recognized alias (matches FFXI's NQ form).
+                    local stripped = short:gsub(' %+%d+$', '')
+                    if stripped ~= short and not seen[stripped] then
+                        table.insert(names, stripped); seen[stripped] = true
+                    end
+                end
+            end
+        end
+    end
+
+    for _, jdata in pairs(job_equipment) do
+        for _, pieces in pairs(jdata) do
+            if type(pieces) == 'table' then
+                for _, piece in ipairs(pieces) do
+                    add_aliases(piece[1])
+                end
+            end
+        end
+    end
+end
 
 -- =============================================================================
 -- Settings (persistent)
@@ -78,7 +200,8 @@ local SCROLL_BTN_H = 20
 local PAD          = 8
 local FOOTER_H     = 38                  -- bottom button strip
 local BTN_H        = 26
-local PANEL_W      = 620                 -- wider to fit 4 tabs + job tag without overlap
+local PANEL_W      = 820                 -- wider to fit Cape augments + status without overlap
+local NAME_COL_W   = 320                 -- width of left "name + status" column
 local PANEL_BODY_H = 460                 -- FIXED body height; content scrolls inside
 
 -- Job picker dropdown (3 cols × 8 rows = 24 cells; 23 entries: Auto + 22 jobs)
@@ -229,11 +352,25 @@ local function item_id_by_name(name)
 end
 
 local function count_material(mat_name)
+    -- Rem's Tale Chapters can exist in TWO forms simultaneously:
+    --   1) Stored as currency ("Rem's Tale Chapters N Stored") — the old
+    --      account-wide bucket registered with the Universal Service NPC.
+    --   2) Raw inventory items ("Rem's Tale Ch.N") — what you actually
+    --      carry around in your bags / satchel / case / etc.
+    -- Modern Reforged Empyrean turn-ins consume the inventory form, so we
+    -- need to sum both. Earlier versions of this code returned ONLY the
+    -- currency value, which made the addon show "4/8" when the player
+    -- really had 4 stored + 12 in satchel = 16 total.
     local curr_name = get_currency_name(mat_name)
-    if curr_name then return currency.get_value(curr_name) or 0 end
-
-    -- Scan all storages
     local total = 0
+    if curr_name then
+        total = total + (currency.get_value(curr_name) or 0)
+    end
+
+    -- Scan all storages for raw inventory items matching mat_name. Skip
+    -- the gil entry and key-items pseudo-bag. Apollyon Units / Temenos
+    -- Units / Gallimaufry currencies have no inventory equivalent, so
+    -- they fall through this loop with no inventory contribution.
     local storage = inventory.get_local_storage() or {}
     for storage_name, items in pairs(storage) do
         if storage_name ~= 'gil' and storage_name ~= 'key items' then
@@ -249,27 +386,37 @@ end
 -- For a piece definition (data row from job_equipment), find the highest tier
 -- the player owns. Returns the tier string ('NQ', '+1', ..., '+4') or nil.
 -- The piece definition format from JSE:
---   { {long_name [, short_name]}, slot_id, { ["+1"]=mats, ["+2"]=mats, ... } }
--- short_name is OPTIONAL — many entries (e.g. {"Brioso Roundlet"}) only have
--- a long name. Default short_name to long_name to keep the probe loop safe.
+--   { {name1, name2, ...}, slot_id, { ["+1"]=mats, ["+2"]=mats, ... } }
+-- The names array can have 1, 2, 3, or more entries — they're aliases for
+-- the SAME piece. FFXI's upgraded variants (+2/+3/+4) sometimes use a
+-- DIFFERENT short abbreviation than the NQ form, e.g. NQ "Con. Bracers"
+-- vs +3 "Convo. Bracers +3" — so the 3rd / 4th name in the array is the
+-- alias for those upgraded forms. We MUST probe all of them, otherwise
+-- pieces sit silently undetected and the Empy/Relic tabs look empty.
 local function highest_owned_tier(piece)
     local names = piece[1] or {}
-    local long_name  = names[1]
-    local short_name = names[2] or long_name
-    if not long_name then return nil end   -- malformed data row — bail
-    local storage    = inventory.get_local_storage() or {}
+    if #names == 0 or not names[1] then return nil end
+    local storage = inventory.get_local_storage() or {}
 
     -- Check each tier in reverse order — the highest owned wins
     for i = #TIER_ORDER, 1, -1 do
         local tier = TIER_ORDER[i]
-        local probe_name  = (tier == 'NQ') and long_name  or (long_name  .. ' ' .. tier)
-        local probe_short = (tier == 'NQ') and short_name or (short_name .. ' ' .. tier)
+        -- Build the set of probe strings for this tier — every alias from
+        -- the data row, with the tier suffix appended (except for NQ).
+        local probes = {}
+        for _, base in ipairs(names) do
+            if tier == 'NQ' then
+                probes[base] = true
+            else
+                probes[base .. ' ' .. tier] = true
+            end
+        end
+
         for storage_name, items in pairs(storage) do
             if storage_name ~= 'gil' and storage_name ~= 'key items' then
                 for item_id, _ in pairs(items) do
                     local item = res.items[tonumber(item_id)]
-                    if item and (item.name == probe_name or item.name == probe_short
-                                 or item.english == probe_name or item.english == probe_short) then
+                    if item and (probes[item.name] or probes[item.english]) then
                         return tier
                     end
                 end
@@ -279,15 +426,32 @@ local function highest_owned_tier(piece)
     return nil
 end
 
--- Returns the tier label the piece is NEXT upgradeable to.
--- 'NQ' owned → '+1' next; '+4' owned → nil (maxed).
-local function next_tier(owned)
-    if not owned then return '+1' end   -- nothing owned, +1 is the first stage
-    if owned == 'NQ' then return '+1' end
-    if owned == '+1' then return '+2' end
-    if owned == '+2' then return '+3' end
-    if owned == '+3' then return '+4' end
-    return nil    -- +4 = maxed
+-- Returns the tier label the piece is NEXT upgradeable to, given the piece's
+-- max defined tier (since not every set chains to +4 — Reforged Empyrean
+-- caps at +3, Original Empyrean at +2). Without a piece argument the function
+-- assumes the legacy AF chain (+4 max) for backward compatibility.
+local TIER_NEXT_BASE = { ['NQ'] = '+1', ['+1'] = '+2', ['+2'] = '+3', ['+3'] = '+4' }
+local TIER_VALUE     = { ['NQ'] = 0, ['+1'] = 1, ['+2'] = 2, ['+3'] = 3, ['+4'] = 4 }
+
+local function next_tier(owned, max_tier)
+    if not owned then return '+1' end
+    max_tier = max_tier or '+4'
+    if (TIER_VALUE[owned] or 0) >= (TIER_VALUE[max_tier] or 4) then
+        return nil    -- already at max defined tier
+    end
+    return TIER_NEXT_BASE[owned]
+end
+
+-- Inspect a piece's upgrade table (piece[3]) and find the highest defined
+-- tier (the cap above which no further upgrades exist). Returns a tier
+-- string ('+2' / '+3' / '+4'). Defaults to '+4' when no tiers are defined.
+local function piece_max_tier(piece)
+    local upgrades = piece[3] or {}
+    local max = 'NQ'
+    for _, t in ipairs({ '+1', '+2', '+3', '+4' }) do
+        if upgrades[t] then max = t end
+    end
+    return max
 end
 
 -- Returns true if every material for the given upgrade is available.
@@ -465,6 +629,49 @@ local function bag_summary(item_name)
     return '[' .. table.concat(list, ', ') .. ']'
 end
 
+-- Per-bag aggregated counts for an item name, e.g. "{Inv 99, Case 2}".
+-- Used by the Capes tab to show under each non-max augment where the
+-- corresponding Abdhaljs item sits and how many you have. Differs from
+-- bag_summary() in that it includes the count number per bag, not just
+-- the bag-name list.
+local function bag_summary_counts(item_name)
+    local target_id = item_id_by_name(item_name)
+    if not target_id then return '' end
+
+    local items = windower.ffxi.get_items()
+    if not items then return '' end
+
+    local by_bag = {}    -- short → cumulative count
+    local order  = {}    -- preserves first-seen order for stable display
+
+    -- Equipped occurrences first (rare for augment items but cheap to scan)
+    if items.equipment then
+        for _, eq in pairs(items.equipment) do
+            if type(eq) == 'table' and eq.bag and eq.slot and eq.slot > 0 then
+                local bag = items[BAG_NAMES[eq.bag] or '']
+                local it = bag and bag[eq.slot]
+                if it and type(it) == 'table' and it.id == target_id then
+                    if by_bag['Equip'] == nil then table.insert(order, 'Equip') end
+                    by_bag['Equip'] = (by_bag['Equip'] or 0) + (it.count or 1)
+                end
+            end
+        end
+    end
+
+    for _, loc in ipairs(find_item_locations(item_name)) do
+        local short = BAG_SHORT[loc.bag_id] or '?'
+        if by_bag[short] == nil then table.insert(order, short) end
+        by_bag[short] = (by_bag[short] or 0) + (loc.count or 0)
+    end
+
+    if #order == 0 then return '' end
+    local parts = {}
+    for _, short in ipairs(order) do
+        table.insert(parts, short .. ' ' .. by_bag[short])
+    end
+    return '{' .. table.concat(parts, ', ') .. '}'
+end
+
 -- Find the equipment slot the given item ID is currently equipped to (if any).
 -- Returns (slot_unequip_name, bag_id, bag_slot) or nil.
 local function find_equipped_slot(item_id)
@@ -609,16 +816,19 @@ local function gather_for_piece(piece_state)
                 local have_inv = count_in_inv(target_id)
                 local need = m.count - have_inv
                 if need > 0 then
-                    -- Pull from field bags first
+                    -- First pass: count field-accessible vs mog-only stock.
+                    -- We need both totals up front so we don't double-report
+                    -- an item as "stuck in mog house" AND "missing" when in
+                    -- reality the mog house has the full needed amount.
                     local locs = find_item_locations(m.name)
                     local taken = 0
+                    local mog_available = 0
                     for _, loc in ipairs(locs) do
-                        if taken >= need then break end
                         if loc.bag_id == BAG.inventory then
                             -- already in inv, skip
                         elseif loc.mog_only and not in_mog then
-                            mog_blocked[m.name] = (mog_blocked[m.name] or 0) + loc.count
-                        else
+                            mog_available = mog_available + loc.count
+                        elseif taken < need then
                             local take = math.min(loc.count, need - taken)
                             table.insert(moves, {
                                 bag_id = loc.bag_id, slot = loc.slot, count = take,
@@ -627,8 +837,20 @@ local function gather_for_piece(piece_state)
                             taken = taken + take
                         end
                     end
-                    if taken + have_inv < m.count then
-                        still_need[m.name] = m.count - have_inv - taken
+                    -- After moving from field bags, how much do we still owe?
+                    -- Reconcile against mog availability so we report exactly
+                    -- one of: mog_blocked (mog house can cover the gap),
+                    -- still_need (truly missing), or split (partial mog).
+                    local short = m.count - have_inv - taken
+                    if short > 0 then
+                        if mog_available >= short then
+                            mog_blocked[m.name] = short
+                        elseif mog_available > 0 then
+                            mog_blocked[m.name] = mog_available
+                            still_need[m.name]  = short - mog_available
+                        else
+                            still_need[m.name]  = short
+                        end
                     end
                 end
             end
@@ -662,17 +884,20 @@ local function gather_for_piece(piece_state)
         return
     end
 
-    -- Execute moves. windower.ffxi.put_item(bag_id, slot, count) takes a
-    -- COUNT parameter and will split-stack when count < stack size — so if
-    -- you need 12 SMN Cards and the stack has 99, this moves exactly 12,
-    -- leaving 87 in the source bag.
+    -- Execute moves. windower.ffxi.get_item(source_bag, source_slot, count)
+    -- pulls an item FROM another bag INTO inventory. (put_item is the
+    -- opposite — inventory TO another bag — and is the WRONG call for
+    -- gathering. This bug previously caused gather to silently no-op for
+    -- field-accessible storage like Case/Satchel.)
+    -- Count parameter split-stacks correctly: if you need 12 SMN Cards and
+    -- the stack has 99, the call moves exactly 12, leaving 87 in the source.
     --
     -- If the piece is currently equipped, unequip first and delay the moves
-    -- ~0.7s so the server processes the unequip before the put_item.
+    -- ~0.7s so the server processes the unequip before get_item.
     notify(('Gathering %d stack(s) for %s...'):format(#moves, piece_state.name), 158)
     local function do_moves()
         for _, mv in ipairs(moves) do
-            windower.ffxi.put_item(mv.bag_id, mv.slot, mv.count)
+            windower.ffxi.get_item(mv.bag_id, mv.slot, mv.count)
             local from = BAG_SHORT[mv.bag_id] or BAG_NAMES[mv.bag_id] or '?'
             local tag = mv.is_piece and '  (piece) +' or '  +'
             notify(('%s %s x%d  (from %s)'):format(tag, mv.name, mv.count, from), 160)
@@ -719,8 +944,15 @@ local function trade_for_piece(piece_state)
     if not target then
         notify('No target selected. Target the upgrade NPC first, then click Trade.', 167); return
     end
-    if target.spawn_type ~= 16 then   -- 16 = NPC
-        notify('Target must be an NPC. Currently targeting: ' .. (target.name or '?'), 167); return
+    -- Windower spawn_type values:  1 = PC, 2 = NPC (event/quest/upgrade
+    -- givers like Monisette, Gorpa-Masorpa), 13 = Trust, 16 = mob.
+    -- My earlier code checked `== 16` which incorrectly flagged real NPCs
+    -- as invalid. Anything that ISN'T a PC, trust, or mob is a tradeable
+    -- NPC; we also accept type 16 in case the server tags a target oddly.
+    local st = target.spawn_type
+    if st == 1 or st == 13 then
+        notify('Target must be an NPC, not a player/trust. Currently targeting: '
+            .. (target.name or '?'), 167); return
     end
 
     -- Build the list of inventory slots to put in the trade window
@@ -792,76 +1024,288 @@ local function trade_for_piece(piece_state)
     end, 0.3 * (#trade_stacks + 1))
 end
 
+-- =============================================================================
+-- Cape augment helpers
+-- =============================================================================
+-- Cape augments come from 4 different items, each occupying a fixed slot:
+--   slot 1 = Abdhaljs Thread (stats)
+--   slot 2 = Abdhaljs Dust   (combat: acc/atk, racc/ratk, macc/mdmg, eva/meva)
+--   slot 3 = Abdhaljs Dye    (secondary stats)
+--   slot 4 = Abdhaljs Sap    (special effects: WSD, crit, STP, DA, haste, etc.)
+-- (Slot indices match capetrader's threadIndex/dustIndex/dyeIndex/sapIndex.)
+local CAPE_SLOT_LABEL = { 'Thread', 'Dust', 'Dye', 'Sap' }
+local CAPE_SLOT_ITEM  = {
+    [1] = 'Abdhaljs Thread',
+    [2] = 'Abdhaljs Dust',
+    [3] = 'Abdhaljs Dye',
+    [4] = 'Abdhaljs Sap',
+}
+local CAPE_SLOT_PREFIX = { [1] = 'thread', [2] = 'dust', [3] = 'dye', [4] = 'sap' }
+
+-- Lower-cased substring containment, treating spaces flexibly.
+local function aug_contains_all(lc_aug, parts)
+    if not parts then return true end
+    for _, needle in ipairs(parts) do
+        if not lc_aug:find(needle:lower(), 1, true) then return false end
+    end
+    return true
+end
+local function aug_contains_none(lc_aug, parts)
+    if not parts then return true end
+    for _, needle in ipairs(parts) do
+        if lc_aug:find(needle:lower(), 1, true) then return false end
+    end
+    return true
+end
+
+-- Match an augment string + slot index → category entry from cape_aug_max.
+-- Only categories prefixed with this slot's item type ("thread", "dust", "dye",
+-- "sap") are considered. Returns { max = number, category = key } or nil if
+-- no match (rare — usually means an augment we don't have data on).
+local function match_aug_category(aug_str, slot_idx)
+    if not aug_str or aug_str == '' then return nil end
+    local prefix = CAPE_SLOT_PREFIX[slot_idx]
+    if not prefix then return nil end
+    local lc = aug_str:lower()
+    for key, info in pairs(cape_aug_max) do
+        if key:sub(1, #prefix) == prefix
+            and aug_contains_all(lc, info.mustcontain)
+            and aug_contains_none(lc, info.cantcontain) then
+            return { max = tonumber(info.max), category = key }
+        end
+    end
+    return nil
+end
+
+-- Extract the numeric value (e.g. "+15", "10") from an augment line.
+-- Returns the integer or nil if no number found.
+local function aug_value(aug_str)
+    if not aug_str then return nil end
+    -- Prefer "+NN" form (most augments); fall back to first integer found.
+    local v = aug_str:match('([%+%-]?%d+)')
+    return v and tonumber(v) or nil
+end
+
+-- Decide if an augment string represents a real, filled augment (i.e. not
+-- an empty slot marker like "", "none", "-", etc.).
+local function aug_is_real(aug_str)
+    if not aug_str then return false end
+    local s = aug_str:gsub('^%s+', ''):gsub('%s+$', '')
+    if s == '' then return false end
+    local lc = s:lower()
+    if lc == 'none' or lc == '-' or lc == 'unaugmented' then return false end
+    return true
+end
+
+-- Soft word-wrap. Greedy split-on-spaces; returns a list of strings, none
+-- longer than max_chars. Windower's text primitives don't wrap natively
+-- (they just clip / overflow), so the Capes tab calls this explicitly to
+-- break long multi-stat augment lines (e.g. threadpetmelee values).
+local function wrap_text(text, max_chars)
+    if not text or text == '' then return { '' } end
+    if #text <= max_chars then return { text } end
+    local lines = {}
+    local cur = ''
+    for word in text:gmatch('%S+') do
+        if cur == '' then
+            cur = word
+        elseif #cur + 1 + #word <= max_chars then
+            cur = cur .. ' ' .. word
+        else
+            table.insert(lines, cur)
+            cur = word
+        end
+    end
+    if cur ~= '' then table.insert(lines, cur) end
+    return lines
+end
+
 -- Get the list of pieces to show, with state per piece. Returns array of:
 --   { piece, owned_tier, next_tier, can_upgrade, mats_for_next }
 local function compute_piece_states()
     local job = active_job()
     local armor = settings.tab
 
-    -- CAPE tab: single "piece" = the job's Ambuscade cape. The "materials"
-    -- list is repurposed to show the 4 augment items in your inventory.
-    -- count=0 so every item shows ✓ (you can't be "short" on augment items,
-    -- you just have what you have).
+    -- CAPE tab: scan all bags for the ACTIVE JOB's JSE cape (Cichol's
+    -- Mantle for WAR, Alaunus's Cape for WHM, etc.). All copies of that
+    -- cape with different augment builds are listed as separate rows.
+    -- Job filtering matches AF/Relic/Empy behavior — the dropdown / auto-
+    -- detected job drives everything.
     if armor == 'CAPE' then
-        local cape_name = JOB_CAPE[job:lower()]
-        if not cape_name then return {} end
-        local item_id = item_id_by_name(cape_name)
+        local target_cape = JOB_CAPE[job:lower()]
+        if not target_cape then return {} end
+        local target_id   = item_id_by_name(target_cape)
 
-        -- Find the cape item itself (across all bags + equipped) so we can
-        -- decode its augments via extdata. We need the actual item table,
-        -- not just the resource definition — augments live in item.extdata.
         local items = windower.ffxi.get_items()
-        local cape_item = nil
-        if item_id and items then
-            -- Walk every bag including equipped (via equipment table)
-            local function scan_bag(bag_name)
+        local found = {}    -- list of { item, info }
+        if items and target_id then
+            for _, bag_name in pairs(BAG_NAMES) do
                 local bag = items[bag_name]
-                if not bag or type(bag) ~= 'table' then return end
-                for slot = 1, (bag.max or 80) do
-                    local it = bag[slot]
-                    if it and type(it) == 'table' and it.id == item_id then
-                        cape_item = it
-                        return
+                if bag and type(bag) == 'table' then
+                    for slot = 1, (bag.max or 80) do
+                        local it = bag[slot]
+                        if it and type(it) == 'table' and it.id == target_id then
+                            table.insert(found, {
+                                item = it,
+                                info = { name = target_cape, job = job:upper() },
+                            })
+                        end
                     end
                 end
             end
-            for _, name in pairs(BAG_NAMES) do
-                if not cape_item then scan_bag(name) end
+        end
+
+        if #found == 0 then return {} end   -- empty state covers "none owned"
+
+        -- Right column width with PANEL_W=820 + NAME_COL_W=320:
+        --   right_x  = pos.x + 11 + 32 + 8 + 320 = pos.x + 371
+        --   right    = pos.x + 820 - 3 - 8       = pos.x + 809
+        --   usable   = 809 - 371                 = 438 px
+        -- Consolas-10 char visual ≈ 7-8 px. 54 × 8 = 432 px leaves a
+        -- small inner margin so wrapped lines don't kiss the right border.
+        local WRAP_CHARS = 54
+
+        local out = {}
+        for _, fc in ipairs(found) do
+            local decoded  = extdata.decode(fc.item)
+            local augments = decoded and decoded.augments or nil
+
+            local slot_records = {}
+            local empty_count  = 0
+            local nonmax_count = 0
+
+            for i = 1, 4 do
+                local raw   = augments and augments[i] or ''
+                local clean = (raw or ''):gsub('^%s+', ''):gsub('%s+$', '')
+                local is_real = aug_is_real(clean)
+                local rec = {
+                    slot       = i,
+                    slot_label = CAPE_SLOT_LABEL[i],
+                    slot_item  = CAPE_SLOT_ITEM[i],
+                    text       = clean,
+                    is_empty   = not is_real,
+                    is_max     = false,
+                    value      = nil,
+                    max        = nil,
+                }
+                if is_real then
+                    local cat = match_aug_category(clean, i)
+                    local val = aug_value(clean)
+                    rec.value = val
+                    if cat then
+                        rec.max = cat.max
+                        if val and rec.max and val >= rec.max then rec.is_max = true end
+                    end
+                    if not rec.is_max then nonmax_count = nonmax_count + 1 end
+                else
+                    empty_count = empty_count + 1
+                end
+                table.insert(slot_records, rec)
             end
-        end
 
-        local augments = nil
-        if cape_item then
-            local decoded = extdata.decode(cape_item)
-            augments = decoded and decoded.augments or nil
-        end
-
-        if not cape_item then return {} end   -- empty state covers "not owned"
-
-        -- Build the "mats" list from the cape's actual augments (not the
-        -- augment items in your inventory — those go in the Trade NPC flow).
-        -- Skip empty / "none" augment entries.
-        local aug_lines = {}
-        if augments then
-            for _, a in ipairs(augments) do
-                local clean = (a or ''):gsub('^%s+', ''):gsub('%s+$', '')
-                if clean ~= '' and clean:lower() ~= 'none' then
-                    table.insert(aug_lines, clean)
+            -- Build the right-column display lines. Each filled augment:
+            --   green ✓ "<aug>  [Thread MAX]"   when maxed
+            --   red   ✗ "<aug>  [Thread → Abdhaljs Thread]"   otherwise
+            -- Long lines wrap to multiple display rows (continuation indented).
+            -- For non-max augments we ALSO append a sub-line showing where
+            -- the upgrade item sits and how many — e.g.
+            --   "    Abdhaljs Dust → {Inv 99, Case 2}"
+            -- (or "none in storage" if you have zero of the upgrade item).
+            -- Empty slots are NOT shown inline — they roll up into a single
+            -- "(# Augments Available)" footer line, per user request.
+            local lines = {}
+            for _, rec in ipairs(slot_records) do
+                if not rec.is_empty then
+                    local prefix, suffix, color
+                    if rec.is_max then
+                        prefix = '✓ '
+                        suffix = '  [' .. rec.slot_label .. ' MAX]'
+                        color  = C_PIECE_MAX
+                    else
+                        prefix = '✗ '
+                        suffix = '  [' .. rec.slot_label .. ' → ' .. rec.slot_item .. ']'
+                        color  = C_MAT_NEED
+                    end
+                    local full = prefix .. rec.text .. suffix
+                    local wrapped = wrap_text(full, WRAP_CHARS)
+                    for idx, ln in ipairs(wrapped) do
+                        table.insert(lines, {
+                            text  = (idx == 1) and ln or ('    ' .. ln),
+                            color = color,
+                        })
+                    end
+                    if not rec.is_max then
+                        -- Where-to-find sub-line. Indented 4 spaces under the
+                        -- augment so it visually groups as a child line.
+                        local where = bag_summary_counts(rec.slot_item)
+                        local sub_text
+                        if where == '' then
+                            sub_text = '    ' .. rec.slot_item .. ' → (none in storage)'
+                        else
+                            sub_text = '    ' .. rec.slot_item .. ' → ' .. where
+                        end
+                        -- Wrap the sub-line too in case bag counts get long.
+                        local wrapped_sub = wrap_text(sub_text, WRAP_CHARS)
+                        for idx, ln in ipairs(wrapped_sub) do
+                            table.insert(lines, {
+                                text  = (idx == 1) and ln or ('        ' .. ln),
+                                color = C_SUMMARY,
+                            })
+                        end
+                    end
                 end
             end
+            if empty_count > 0 then
+                table.insert(lines, {
+                    text  = string.format('(%d Augment%s Available)',
+                        empty_count, empty_count == 1 and '' or 's'),
+                    color = C_MAT_NEED,
+                })
+            end
+            if #lines == 0 then
+                table.insert(lines, {
+                    text  = '(unaugmented — use //capetrader)',
+                    color = C_SUMMARY,
+                })
+            end
+
+            local item_id = fc.item.id
+            -- Distinguish multiples of the same cape with a (#N) marker.
+            -- A second pass renumbers per-name; we tag here for the loop below.
+            table.insert(out, {
+                piece = nil,
+                name  = fc.info.name,
+                cape_job = fc.info.job,
+                owned = 'NQ',
+                item_id = item_id,
+                next_tier = 'Augment',
+                cape_augments = slot_records,
+                cape_summary = {
+                    empty_count  = empty_count,
+                    nonmax_count = nonmax_count,
+                    maxed_count  = 4 - empty_count - nonmax_count,
+                },
+                display_lines = lines,
+                mats = lines,        -- compat: piece_block_height uses #p.mats
+                ready = nil,
+                is_cape = true,
+                cape_unfilled = (empty_count > 0) or (nonmax_count > 0),
+            })
         end
 
-        return { {
-            piece = nil,
-            name  = cape_name,
-            owned = 'NQ',
-            item_id = item_id,
-            next_tier = 'Augment',          -- not a real tier; just non-nil so render takes "augment" path
-            cape_augments = aug_lines,      -- list of augment strings
-            mats  = aug_lines,              -- compat: piece_block_height uses #p.mats
-            ready = nil,
-            is_cape = true,
-        } }
+        -- Append " (#N)" disambiguator when the same cape appears more than
+        -- once (multiple builds on the same job's cape).
+        local seen = {}
+        for _, p in ipairs(out) do seen[p.name] = (seen[p.name] or 0) + 1 end
+        local cur_index = {}
+        for _, p in ipairs(out) do
+            if seen[p.name] > 1 then
+                cur_index[p.name] = (cur_index[p.name] or 0) + 1
+                p.name = p.name .. ' (#' .. cur_index[p.name] .. ')'
+            end
+        end
+
+        return out
     end
 
     -- AF / Relic / Empyrean — standard piece list
@@ -871,13 +1315,33 @@ local function compute_piece_states()
         local owned = highest_owned_tier(piece)
         -- List mode: only show pieces the player owns (any tier including NQ)
         if owned then
-            local nxt   = next_tier(owned)
+            -- Per-piece cap. Reforged AF chains to +4, Reforged Empyrean to
+            -- +3, Original Empyrean (Caller's / Ravager's / etc.) to +2.
+            local max_tier = piece_max_tier(piece)
+            local nxt   = next_tier(owned, max_tier)
             local mats  = (nxt and piece[3]) and piece[3][nxt] or nil
             local ready = mats and can_upgrade(mats)
             local long_name = (piece[1] or {})[1] or '?'
             -- Resolve the owned-tier item ID so we can pull its icon.
             local probe = (owned == 'NQ') and long_name or (long_name .. ' ' .. owned)
             local item_id = item_id_by_name(probe) or item_id_by_name(long_name)
+
+            -- Cross-set upgrade: Original Empyrean and Original AF pieces
+            -- carry a piece[4] = "Reforged set NQ name" so the addon can show
+            -- "Caller's Horn +2 → Beckoner's Horn" / "Wizard's Petasos →
+            -- Spaekona's Petasos" instead of a meaningless "+N → +M" label.
+            --
+            -- piece[5] is the tier at which the cross-set conversion becomes
+            -- valid. Defaults to '+1' (Empyrean: NQ → +1 via Magian is a
+            -- prerequisite, the cross-set conversion only applies from +1
+            -- upward). AF passes '"NQ"' since NQ AF can convert directly to
+            -- Reforged NQ.
+            local into_next        = piece[4]
+            local cross_from_tier  = piece[5] or '+1'
+            local owned_v          = TIER_VALUE[owned] or 0
+            local cross_v          = TIER_VALUE[cross_from_tier] or 1
+            local show_into        = (into_next ~= nil) and (owned_v >= cross_v)
+
             table.insert(out, {
                 piece = piece,
                 name  = long_name,
@@ -886,6 +1350,8 @@ local function compute_piece_states()
                 next_tier = nxt,
                 mats  = mats,
                 ready = ready,
+                into_next   = into_next,
+                show_into   = show_into,
             })
         end
     end
@@ -898,7 +1364,9 @@ end
 -- the "use //capetrader" hint line.
 local function piece_block_height(p)
     if not p.mats then return PIECE_H end
-    local mat_count = #p.mats + (p.is_cape and 1 or 0)
+    -- For cape rows, p.mats is the pre-wrapped display_lines list — already
+    -- counts continuation lines + the "(N Augments Available)" footer.
+    local mat_count = #p.mats
     return math.max(PIECE_H, PIECE_H + (mat_count * ROW_H) - ROW_H + 4)
 end
 
@@ -1073,10 +1541,12 @@ local function build_window()
     if #pieces == 0 then
         local msg
         if settings.tab == 'CAPE' then
+            -- Capes tab is filtered by the active job. Empty state = the
+            -- player doesn't own this job's JSE cape.
             local cape_name = JOB_CAPE[job:lower()] or '?'
-            msg = 'Cape for ' .. job .. ': ' .. cape_name .. '\n'
-                .. '(You don\'t own this cape yet — get it from\n'
-                .. ' the Ambuscade reward NPC in Mhaura.)'
+            msg = 'No ' .. cape_name .. ' for ' .. job .. ' found in any storage.\n'
+                .. '(Get one from the Ambuscade reward NPC in Mhaura\n'
+                .. ' and augment it via Gorpa-Masorpa.)'
         else
             -- Distinguish "no data" (no upgrade table for this job/armor)
             -- from "you don't own any pieces of this set yet".
@@ -1091,21 +1561,37 @@ local function build_window()
         end
         ui.el.empty = make_text(msg, tb_x + PAD, body_y + PAD, C_SUMMARY, 11)
         for _, e in pairs(ui.el) do show(e) end
+        -- IMPORTANT: still render the job-picker dropdown in the empty
+        -- state so the player can switch jobs to a tab they DO have data
+        -- for. Without this, a click on [RDM*] flips ui.dropdown_open=true
+        -- but the cells never get drawn (we'd return before reaching the
+        -- build_dropdown() call at the bottom of the function).
+        if ui.dropdown_open then build_dropdown() end
         return
     end
 
     -- List mode — owned pieces only. Three-column-ish layout:
-    --   [icon] [name + tier + status]              [materials | MAXED]
-    --    32px   ~210px                             ~280px
+    --   [icon] [name + tier + status]                       [materials]
+    --    32px   NAME_COL_W                                  (rest of body)
     --
     -- Scroll offsets the entire content; pieces outside the visible body
     -- band are skipped on render to save image-element creation work.
+    -- Partially-visible pieces clip on a per-element basis (text lines /
+    -- icon hidden individually) because Windower's text/image primitives
+    -- do NOT clip to a parent rect on their own — drawing them at a y
+    -- value above body_top would visibly bleed past the title bar.
     local icon_x  = tb_x + PAD
     local name_x  = icon_x + ICON_SIZE + 8
-    local right_x = tb_x + PAD + ICON_SIZE + 8 + 210
+    local right_x = name_x + NAME_COL_W
     local cur_y   = body_y + PAD - ui.scroll
     local body_top = body_y
     local body_bot = body_y + body_h - PAD
+
+    -- Per-element body-bounds guard. `h` defaults to one text-row's height.
+    local function in_body(y, h)
+        h = h or ROW_H
+        return y >= body_top and (y + h) <= body_bot
+    end
 
     for _, p in ipairs(pieces) do
         local block_h   = piece_block_height(p)
@@ -1114,17 +1600,29 @@ local function build_window()
 
         -- Only render pieces that intersect the visible body band
         if block_bot > body_top and block_top < body_bot then
-            -- Selected-row highlight (subtle tint behind the row)
+            -- Selected-row highlight (subtle tint behind the row). Clip the
+            -- highlight to the body band so it doesn't bleed into the title
+            -- bar / footer when the piece is partially scrolled out.
             local row_hl = nil
             if ui.selected_name == p.name then
-                row_hl = make_bg(icon_x - 2, cur_y - 2, tb_w - PAD * 2 + 4, block_h, C_SEL_HIGHLIGHT)
+                local hl_top    = math.max(cur_y - 2, body_top)
+                local hl_bot    = math.min(cur_y - 2 + block_h, body_bot)
+                local hl_height = hl_bot - hl_top
+                if hl_height > 0 then
+                    row_hl = make_bg(icon_x - 2, hl_top, tb_w - PAD * 2 + 4, hl_height, C_SEL_HIGHLIGHT)
+                end
             end
 
             -- ===== LEFT: icon + name + status =====
             local left_icon, left_color
             if p.is_cape then
-                left_icon  = '◆'           -- cape indicator (no tier system)
-                left_color = C_PIECE_READY
+                if p.cape_unfilled then
+                    left_icon  = '✗'       -- cape has empty / non-max slots
+                    left_color = C_PIECE_NEED
+                else
+                    left_icon  = '✓'       -- fully augmented + all slots maxed
+                    left_color = C_PIECE_MAX
+                end
             elseif not p.next_tier then
                 left_icon  = '✓'           -- maxed
                 left_color = C_PIECE_MAX
@@ -1136,45 +1634,73 @@ local function build_window()
                 left_color = C_PIECE_NEED
             end
 
-            -- 32x32 item icon. icon_handler.create_image returns a hidden
-            -- image element; load_icon binds the texture by item ID.
-            -- If item_id couldn't be resolved (rare), the image stays
-            -- empty alpha=0 so it doesn't render a gray box.
-            local icon = icon_handler.create_image({
-                pos  = { x = icon_x, y = cur_y },
-                size = { width = ICON_SIZE, height = ICON_SIZE },
-            })
-            if p.item_id then
-                icon_handler.load_icon(icon, p.item_id)
+            -- 32x32 item icon. Only create when fully inside the body band —
+            -- Windower images draw at their pos.x/pos.y with no clipping, so
+            -- a partially-scrolled icon would bleed above the title bar.
+            local icon = nil
+            if in_body(cur_y, ICON_SIZE) then
+                icon = icon_handler.create_image({
+                    pos  = { x = icon_x, y = cur_y },
+                    size = { width = ICON_SIZE, height = ICON_SIZE },
+                })
+                if p.item_id then
+                    icon_handler.load_icon(icon, p.item_id)
+                end
             end
 
             -- Name text sits ~6px down so it visually centers next to the icon
-            local owned_label = (p.owned == 'NQ') and '' or (' ' .. p.owned)
+            local owned_label
+            if p.is_cape then
+                -- Cape header = fill summary only. The active job is already
+                -- shown in the dropdown at the top-right of the title bar, so
+                -- repeating it on every cape row was redundant and pushed the
+                -- text into the right column.
+                local s = p.cape_summary or { empty_count = 4, nonmax_count = 0, maxed_count = 0 }
+                if s.maxed_count == 4 then
+                    owned_label = '  FULL (4/4 MAX)'
+                elseif s.empty_count == 0 then
+                    owned_label = string.format('  %d/4 MAX', s.maxed_count)
+                else
+                    owned_label = string.format('  %d/4 filled', 4 - s.empty_count)
+                end
+            else
+                owned_label = (p.owned == 'NQ') and '' or (' ' .. p.owned)
+                -- Cross-set upgrade label: Caller's Horn +2 → Beckoner's Horn
+                if p.show_into then
+                    owned_label = owned_label .. '  → ' .. p.into_next
+                end
+            end
             local left_str = string.format('%s %s%s', left_icon, p.name, owned_label)
-            local left_text = make_text(left_str, name_x, cur_y + 8, left_color, 11, false)
+            local left_text = nil
+            if in_body(cur_y + 8, ROW_H) then
+                left_text = make_text(left_str, name_x, cur_y + 8, left_color, 11, false)
+            end
 
             -- ===== RIGHT: materials list or MAXED =====
+            -- Each text element is bounds-checked individually so long
+            -- pieces partially scrolled out of the body clip line-by-line
+            -- instead of bleeding past the title bar / footer.
             local mat_texts = {}
+            local function add_mat(content, x, y, color, size, bold)
+                if not in_body(y, ROW_H) then return end
+                table.insert(mat_texts, make_text(content, x, y, color, size, bold))
+            end
             if p.is_cape then
-                -- Cape tab: show the AUGMENTS chosen on this cape, decoded
-                -- from the item's extdata. Empty slots / "none" entries are
-                -- filtered out in compute_piece_states.
-                local aug_list = p.cape_augments or {}
-                if #aug_list == 0 then
-                    local mt = make_text(
-                        'No augments yet — use //capetrader prep / go to augment',
-                        right_x, cur_y + 8, C_SUMMARY, 10, false)
-                    table.insert(mat_texts, mt)
+                -- Cape tab: pre-built display lines (wrapped + colored in
+                -- compute_piece_states). One text primitive per line.
+                local lines = p.display_lines or {}
+                if #lines == 0 then
+                    add_mat('(no augment data)', right_x, cur_y + 8, C_SUMMARY, 10, false)
                 else
-                    for i, aug in ipairs(aug_list) do
-                        local mt = make_text('• ' .. aug, right_x,
-                            cur_y + (i - 1) * ROW_H, C_MAT_HAVE, 10)
-                        table.insert(mat_texts, mt)
+                    for i, ln in ipairs(lines) do
+                        add_mat(ln.text, right_x, cur_y + (i - 1) * ROW_H, ln.color, 10)
                     end
                 end
             elseif not p.next_tier then
-                local mt = make_text('MAXED (+4)', right_x, cur_y + 8, C_PIECE_MAX, 11, true)
-                table.insert(mat_texts, mt)
+                -- Show the actual owned tier in the MAXED label (e.g. +2 for
+                -- Original Empyrean, +3 for Reforged Empyrean, +4 for AF).
+                local cap_label = (p.owned == 'NQ') and 'MAXED' or ('MAXED (' .. p.owned .. ')')
+                add_mat(cap_label, right_x, cur_y + 8, C_PIECE_MAX, 11, true)
             elseif p.mats and #p.mats > 0 then
                 for i, mat in ipairs(p.mats) do
                     local have  = count_material(mat.name)
@@ -1183,12 +1709,12 @@ local function build_window()
                     local check = ok and '✓' or '✗'
                     local where = bag_summary(mat.name)
                     local line  = string.format('%s %s  %d/%d  %s', check, mat.name, have, mat.count, where)
-                    local mt = make_text(line, right_x, cur_y + (i - 1) * ROW_H, color, 10)
-                    table.insert(mat_texts, mt)
+                    add_mat(line, right_x, cur_y + (i - 1) * ROW_H, color, 10)
                 end
             else
-                local mt = make_text('—', right_x, cur_y + 8, C_SUMMARY, 11, false)
-                table.insert(mat_texts, mt)
+                -- No upgrade materials defined for this next tier — rare;
+                -- usually only happens for malformed data rows.
+                add_mat('—', right_x, cur_y + 8, C_SUMMARY, 11, false)
             end
 
             table.insert(ui.rows, {
@@ -1225,10 +1751,21 @@ end
 local function show_window()
     settings.visible = true
     config.save(settings)
-    -- Inventory refresh before showing so data is fresh
+    -- Kick off the async refresh first. inventory.update() writes a fresh
+    -- snapshot to disk (fast, synchronous). currency.request_update() sends
+    -- the gallimaufry / rem's tale / apollyon / temenos chapter query
+    -- packets to the server — those responses arrive a few hundred ms later,
+    -- so build_window() right now would render stale currency counts.
     inventory.update()
     currency.request_update()
+    -- Immediate render so the window appears without delay. Counts will be
+    -- whatever was cached from the previous session.
     build_window()
+    -- Re-render after currency responses have had time to come back. 0.8s
+    -- comfortably covers normal RTT + the slips library's bitmask decode.
+    coroutine.schedule(function()
+        if settings.visible then build_window() end
+    end, 0.8)
 end
 
 local function hide_window()
@@ -1435,7 +1972,7 @@ windower.register_event('addon command', function(cmd, ...)
         settings.tab = 'RELIC'; ui.scroll = 0; config.save(settings); refresh_window()
     elseif cmd == 'empy' or cmd == 'empyrean' then
         settings.tab = 'EMPYREAN'; ui.scroll = 0; config.save(settings); refresh_window()
-    elseif cmd == 'cape' then
+    elseif cmd == 'cape' or cmd == 'capes' then
         settings.tab = 'CAPE'; ui.scroll = 0; config.save(settings); refresh_window()
     elseif cmd == 'job' then
         local j = (args[1] or ''):upper()
@@ -1450,12 +1987,65 @@ windower.register_event('addon command', function(cmd, ...)
             return
         end
         config.save(settings); ui.scroll = 0; refresh_window()
+    elseif cmd == 'diag' or cmd == 'scan' then
+        -- Search every storage for items matching a substring. Useful for
+        -- verifying name lookups when a tab shows "no pieces owned" but
+        -- you know you own pieces. Usage: //fj diag Beck
+        local needle = (args[1] or ''):lower()
+        if needle == '' then
+            windower.add_to_chat(167, '[FFXIJSE] usage: //fj diag <substring>  (e.g. //fj diag Beck)')
+            return
+        end
+        inventory.update()
+        local storage = inventory.get_local_storage() or {}
+        local found = 0
+        windower.add_to_chat(207, '[FFXIJSE] scanning all storage for "' .. needle .. '" ...')
+        for storage_name, items in pairs(storage) do
+            if storage_name ~= 'gil' and storage_name ~= 'key items' then
+                for item_id, qty in pairs(items) do
+                    local item = res.items[tonumber(item_id)]
+                    if item then
+                        local n = (item.name or ''):lower()
+                        local e = (item.english or ''):lower()
+                        if n:find(needle, 1, true) or e:find(needle, 1, true) then
+                            windower.add_to_chat(160, string.format(
+                                '  [%s] %s (english: %s) x%d',
+                                storage_name, item.name or '?', item.english or '?', qty))
+                            found = found + 1
+                        end
+                    end
+                end
+            end
+        end
+        if found == 0 then
+            windower.add_to_chat(167, '[FFXIJSE] no matches across any storage.')
+        else
+            windower.add_to_chat(207, '[FFXIJSE] ' .. found .. ' match(es).')
+        end
+    elseif cmd == 'aliases' then
+        -- Dump the resolved alias list for every piece in the active job's
+        -- current tab — useful to confirm the auto-population from res.items
+        -- worked and FFXI's inventory short names are recognized.
+        local job   = active_job()
+        local armor = settings.tab
+        if armor == 'CAPE' then
+            windower.add_to_chat(167, '[FFXIJSE] aliases command not applicable on Capes tab.')
+            return
+        end
+        local data = (job_equipment[job] or {})[armor] or {}
+        windower.add_to_chat(207, ('[FFXIJSE] aliases for %s / %s (%d pieces):'):format(job, armor, #data))
+        for _, piece in ipairs(data) do
+            local names = piece[1] or {}
+            windower.add_to_chat(160, '  ' .. table.concat(names, '  |  '))
+        end
     elseif cmd == 'help' or cmd == '?' then
         windower.add_to_chat(207, '[FFXIJSE] Commands:')
         windower.add_to_chat(160, '  //fj            — toggle window (also: J key)')
-        windower.add_to_chat(160, '  //fj af / relic / empy — switch tab')
+        windower.add_to_chat(160, '  //fj af / relic / empy / capes — switch tab')
         windower.add_to_chat(160, '  //fj job <JOB> — override job (or //fj job auto)')
         windower.add_to_chat(160, '  //fj refresh   — re-scan inventory + currency')
+        windower.add_to_chat(160, '  //fj diag <substring> — search storage for matching items')
+        windower.add_to_chat(160, '  //fj aliases         — dump resolved name aliases for the active tab')
     else
         windower.add_to_chat(167, '[FFXIJSE] unknown command: ' .. cmd)
     end
