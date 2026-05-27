@@ -200,8 +200,8 @@ local SCROLL_BTN_H = 20
 local PAD          = 8
 local FOOTER_H     = 38                  -- bottom button strip
 local BTN_H        = 26
-local PANEL_W      = 820                 -- wider to fit Cape augments + status without overlap
-local NAME_COL_W   = 320                 -- width of left "name + status" column
+local PANEL_W      = 900                 -- room for "Name +1 → Reforged Name" without bleeding into right column
+local NAME_COL_W   = 400                 -- left "name + status" column; fits ~50 char labels
 local PANEL_BODY_H = 460                 -- FIXED body height; content scrolls inside
 
 -- Job picker dropdown (3 cols × 8 rows = 24 cells; 23 entries: Auto + 22 jobs)
@@ -1157,10 +1157,10 @@ local function compute_piece_states()
 
         if #found == 0 then return {} end   -- empty state covers "none owned"
 
-        -- Right column width with PANEL_W=820 + NAME_COL_W=320:
-        --   right_x  = pos.x + 11 + 32 + 8 + 320 = pos.x + 371
-        --   right    = pos.x + 820 - 3 - 8       = pos.x + 809
-        --   usable   = 809 - 371                 = 438 px
+        -- Right column width with PANEL_W=900 + NAME_COL_W=400:
+        --   right_x  = pos.x + 11 + 32 + 8 + 400 = pos.x + 451
+        --   right    = pos.x + 900 - 3 - 8       = pos.x + 889
+        --   usable   = 889 - 451                 = 438 px (unchanged)
         -- Consolas-10 char visual ≈ 7-8 px. 54 × 8 = 432 px leaves a
         -- small inner margin so wrapped lines don't kiss the right border.
         local WRAP_CHARS = 54
