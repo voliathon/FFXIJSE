@@ -2054,6 +2054,14 @@ end)
 -- =============================================================================
 -- Lifecycle
 -- =============================================================================
+-- Are we sitting at the login / character-select screen?  windower.ffxi.get_info()
+-- returns logged_in=false until the character is actually in-game. We use it as
+-- the gate for showing the window so the addon doesn't appear over the launcher.
+local function is_player_in_game()
+    local info = windower.ffxi.get_info()
+    return info and info.logged_in == true
+end
+
 windower.register_event('load', function()
     -- Initialize icon extraction (BMPs into libs/cache/<id>.bmp on demand).
     -- icon_handler reads the FFXI install path via windower.ffxi_path; if
@@ -2065,9 +2073,32 @@ windower.register_event('load', function()
     -- Defer slightly so player + inventory are ready, then open the
     -- window if the saved-state says so (default visible=true so it
     -- opens on first install). User can hide with O key or //fj hide.
+    --
+    -- Login-screen guard: only call show_window() if we're already in the
+    -- game world. If the addon loads while the player is at the character
+    -- select / launcher screen, defer the show until the 'login' event
+    -- fires below. Without this guard the panel painted itself on top of
+    -- the login screen, which has zero useful inventory data anyway.
     coroutine.schedule(function()
-        if settings.visible then show_window() end
+        if settings.visible and is_player_in_game() then show_window() end
     end, 2)
+end)
+
+-- Player just finished logging in. If the user previously had the window
+-- open (settings.visible), open it now. Without this, an addon-reload at
+-- character-select followed by a normal login would leave the window
+-- closed even though the user wants it open.
+windower.register_event('login', function()
+    coroutine.schedule(function()
+        if settings.visible and is_player_in_game() then show_window() end
+    end, 2)
+end)
+
+-- Player returned to character select — tear the window down so it doesn't
+-- linger over the FFXI menu. settings.visible is left as-is so a subsequent
+-- 'login' will restore the window for the next character.
+windower.register_event('logout', function()
+    destroy_window()
 end)
 
 windower.register_event('job change', function()
