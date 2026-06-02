@@ -2062,6 +2062,22 @@ local function is_player_in_game()
     return info and info.logged_in == true
 end
 
+-- Auto-hide while chat / macro editor is open so the panel can't ghost
+-- on top of the in-game text overlay. settings.visible is not changed,
+-- so the panel reappears as soon as the input closes.
+local _was_input_open = false
+windower.register_event('prerender', function()
+    local info = windower.ffxi.get_info()
+    local input_open = info and info.chat_open == true
+    if input_open and not _was_input_open then
+        destroy_window()
+        _was_input_open = true
+    elseif (not input_open) and _was_input_open then
+        if settings.visible and is_player_in_game() then show_window() end
+        _was_input_open = false
+    end
+end)
+
 windower.register_event('load', function()
     -- Initialize icon extraction (BMPs into libs/cache/<id>.bmp on demand).
     -- icon_handler reads the FFXI install path via windower.ffxi_path; if
