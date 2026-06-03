@@ -1,3 +1,12 @@
+> [!WARNING]
+> ## 🚧 Trade button — Work In Progress
+>
+> The in-window **Trade** button is still being built out and is not
+> production-ready. It may misfire, target the wrong NPC, or do nothing
+> at all depending on the JSE upgrade flow you're on. Use FFXI's normal
+> trade menu for the time being. Status updates and a checklist of the
+> remaining trade flows will land in this section as they're wrapped up.
+
 <!-- BEGIN DISCLAIMER (managed by FFXIWindower author; do not remove) -->
 ## ⚠️ Disclaimer — Use at Your Own Risk
 
