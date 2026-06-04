@@ -7,7 +7,7 @@ return {
             {
                 ["+1"] = {
                     {name = "Rem's Tale Ch.6", count = 8},
-                    {name = "Platinum Silk Threadr", count = 1},
+                    {name = "Platinum Silk Thread", count = 1},
                     {name = "Maliya. Coral Orb", count = 1}
                 },
                 ["+2"] = {
@@ -33,7 +33,7 @@ return {
             {
                 ["+1"] = {
                     {name = "Rem's Tale Ch.7", count = 8},
-                    {name = "Platinum Silk Threadr", count = 1},
+                    {name = "Platinum Silk Thread", count = 1},
                     {name = "Hepatizon Ingot", count = 1}
                 },
                 ["+2"] = {
@@ -59,7 +59,7 @@ return {
             {
                 ["+1"] = {
                     {name = "Rem's Tale Ch.8", count = 8},
-                    {name = "Platinum Silk Threadr", count = 1},
+                    {name = "Platinum Silk Thread", count = 1},
                     {name = "Beryllium Ingot", count = 1}
                 },
                 ["+2"] = {
@@ -85,7 +85,7 @@ return {
             {
                 ["+1"] = {
                     {name = "Rem's Tale Ch.9", count = 8},
-                    {name = "Platinum Silk Threadr", count = 1},
+                    {name = "Platinum Silk Thread", count = 1},
                     {name = "Exalted Lumber", count = 1}
                 },
                 ["+2"] = {
@@ -111,7 +111,7 @@ return {
             {
                 ["+1"] = {
                     {name = "Rem's Tale Ch.10", count = 8},
-                    {name = "Platinum Silk Threadr", count = 1},
+                    {name = "Platinum Silk Thread", count = 1},
                     {name = "Sif's Macrame", count = 1}
                 },
                 ["+2"] = {

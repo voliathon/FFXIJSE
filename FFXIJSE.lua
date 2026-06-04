@@ -371,12 +371,23 @@ local function count_material(mat_name)
     -- the gil entry and key-items pseudo-bag. Apollyon Units / Temenos
     -- Units / Gallimaufry currencies have no inventory equivalent, so
     -- they fall through this loop with no inventory contribution.
+    --
+    -- Match against BOTH item.name AND item.english. res.items[id].name
+    -- is the inventory-display truncated form FFXI uses inside bags
+    -- (e.g. "Behemoth Lthr."), while .english is the full long name
+    -- ("Behemoth Leather"). The MNK / WAR / BST / etc. job-data files
+    -- use the full english names, so a name-only comparison missed any
+    -- item whose inventory abbreviation differs -- user report: WAR /
+    -- BST AF +1 reforge said the player was missing Behemoth Leather
+    -- when they actually had it sitting in their satchel.
     local storage = inventory.get_local_storage() or {}
     for storage_name, items in pairs(storage) do
         if storage_name ~= 'gil' and storage_name ~= 'key items' then
             for item_id, qty in pairs(items) do
                 local item = res.items[tonumber(item_id)]
-                if item and item.name == mat_name then total = total + qty end
+                if item and (item.name == mat_name
+                             or item.english == mat_name)
+                then total = total + qty end
             end
         end
     end
