@@ -344,8 +344,17 @@ local function item_id_by_name(name)
     if not _item_id_cache then
         _item_id_cache = {}
         for id, item in pairs(res.items) do
-            if item.name    then _item_id_cache[item.name]    = id end
-            if item.english then _item_id_cache[item.english] = id end
+            -- Index by every name form so callers can pass any of:
+            --   .english     = short inventory form  ("Behemoth Lthr.")
+            --   .english_log = full english name     ("Behemoth Leather")
+            --   .name        = locale fallback (= .english on EN clients)
+            -- jobs/*.lua entries use the FULL english_log form so
+            -- english_log MUST be in the index -- without it,
+            -- item_id_by_name("Behemoth Leather") returns nil and the
+            -- piece-row icon resolves to a question mark.
+            if item.name         then _item_id_cache[item.name]         = id end
+            if item.english      then _item_id_cache[item.english]      = id end
+            if item.english_log  then _item_id_cache[item.english_log]  = id end
         end
     end
     return _item_id_cache[name]
@@ -372,21 +381,32 @@ local function count_material(mat_name)
     -- Units / Gallimaufry currencies have no inventory equivalent, so
     -- they fall through this loop with no inventory contribution.
     --
-    -- Match against BOTH item.name AND item.english. res.items[id].name
-    -- is the inventory-display truncated form FFXI uses inside bags
-    -- (e.g. "Behemoth Lthr."), while .english is the full long name
-    -- ("Behemoth Leather"). The MNK / WAR / BST / etc. job-data files
-    -- use the full english names, so a name-only comparison missed any
-    -- item whose inventory abbreviation differs -- user report: WAR /
-    -- BST AF +1 reforge said the player was missing Behemoth Leather
-    -- when they actually had it sitting in their satchel.
+    -- res.items[id] field reference (matches the alias-builder comment
+    -- block earlier in this file):
+    --
+    --     item.english       = `en`  -- SHORT inventory-display form
+    --                                   ("Behemoth Lthr.")
+    --     item.english_log   = `enl` -- FULL english name
+    --                                   ("Behemoth Leather")
+    --     item.name          = same as .english by default; can be a
+    --                          locale fallback in non-EN clients
+    --
+    -- jobs/*.lua data files use the FULL english_log form, so the
+    -- comparison HAS to include item.english_log to match items whose
+    -- inventory abbreviation differs from the full name. A previous
+    -- pass only checked item.name and a follow-up only added
+    -- item.english -- both of those still missed every abbreviated
+    -- item (user report: WAR Pummeler / BST Totemic AF +1 reforge
+    -- said the player was missing "Behemoth Leather" when they had
+    -- it sitting in their satchel).
     local storage = inventory.get_local_storage() or {}
     for storage_name, items in pairs(storage) do
         if storage_name ~= 'gil' and storage_name ~= 'key items' then
             for item_id, qty in pairs(items) do
                 local item = res.items[tonumber(item_id)]
-                if item and (item.name == mat_name
-                             or item.english == mat_name)
+                if item and (item.name         == mat_name
+                             or item.english     == mat_name
+                             or item.english_log == mat_name)
                 then total = total + qty end
             end
         end
